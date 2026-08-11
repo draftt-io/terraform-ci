@@ -1,0 +1,24 @@
+{
+  "name": "@draftt-io/terraform-ci",
+  "version": "0.0.0",
+  "private": true,
+  "description": "GitHub Action for Draftt Terraform policy scans",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "bundle": "ncc build src/index.ts -o dist --minify --license licenses.txt",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@actions/core": "2.0.1",
+    "@actions/github": "8.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@vercel/ncc": "0.44.1",
+    "typescript": "5.9.3"
+  }
+}

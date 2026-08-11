@@ -1,0 +1,46 @@
+name: Draftt Terraform Policy Scan
+description: Scan a scrubbed Terraform plan with Draftt and annotate policy violations
+
+inputs:
+  plan-json:
+    description: Path to an existing Terraform or OpenTofu plan JSON file
+    required: true
+  api-url:
+    description: Full Draftt Terraform scan endpoint
+    required: false
+    default: https://api.draftt.io/ci/scanTerraformPlan
+  api-key:
+    description: Draftt access key
+    required: false
+  github-token:
+    description: GitHub token used to publish the Check Run
+    required: true
+  terraform-root:
+    description: Root Terraform module directory
+    required: false
+    default: .
+  policy-ids:
+    description: Optional JSON array of Draftt policy ids
+    required: false
+  fail-on-violations:
+    description: Fail the Action when clear policy violations are found
+    required: false
+    default: "false"
+  fail-on-scan-error:
+    description: Fail the Action when a reliable scan cannot complete
+    required: false
+    default: "false"
+
+outputs:
+  scan-status:
+    description: completed, skipped, or error
+  violation-count:
+    description: Number of resources with clear policy violations
+  warning-count:
+    description: Number of incomplete evaluation or coverage warnings
+  annotation-count:
+    description: Number of annotations published to the Check Run
+
+runs:
+  using: node24
+  main: dist/index.js
