@@ -34,23 +34,42 @@ test('creates one source annotation per violating component', async () => {
   }
 })
 
+test('includes available lifecycle dates in violation annotations', async () => {
+  const response = scanResponse()
+  const component = response.components[0]
+  assert.ok(component)
+  const policy = component.policyComponents[0]
+  assert.ok(policy)
+  policy.impendingDate = '2026-09-01'
+  policy.outdatedDate = '2027-01-01'
+  policy.dueDate = '2027-03-01'
+
+  const repository = await mkdtemp(path.join(tmpdir(), 'terraform-report-dates-'))
+  try {
+    await writeFile(path.join(repository, 'main.tf'), 'resource "aws_db_instance" "primary" {}\n')
+    const locator = await TerraformSourceLocator.create({ workspaceRoot: repository, terraformRoot: '.' })
+    const annotated = await buildScanReport(response, locator, 'warning', false)
+    assert.match(annotated.annotations[0]?.message ?? '', /impending date 2026-09-01/)
+    assert.match(annotated.annotations[0]?.message ?? '', /outdated date 2027-01-01/)
+    assert.match(annotated.annotations[0]?.message ?? '', /due date 2027-03-01/)
+  } finally {
+    await rm(repository, { recursive: true, force: true })
+  }
+})
+
 test('warns for incomplete results and an explicit empty policy selection', async () => {
   const response = scanResponse({
     summary: { managedResourcesInPlan: 2, componentsMapped: 1, hasPolicyViolations: false },
     components: [],
     evaluation: {
-      evaluatedPolicies: [],
       unevaluatedPolicies: [{ policyId: '11', reason: 'unsupported_policy' }],
-      componentsFullyEvaluated: 0,
       componentsWithGaps: [{
         address: 'aws_db_instance.primary',
-        tfType: 'aws_db_instance',
-        tfName: 'primary',
-        policyGaps: [{ policyId: '10', policyName: 'Version', reason: 'missing_data', fields: ['engine'] }],
+        policyGaps: [{ policyName: 'Version', reason: 'missing_data' }],
       }],
     },
     coverage: {
-      unmappedResources: [{ address: 'custom_widget.example', tfType: 'custom_widget', reason: 'unknown_technology' }],
+      unmappedResources: [{ address: 'custom_widget.example', reason: 'unknown_technology' }],
       mergedResources: [],
       skippedResources: [],
     },

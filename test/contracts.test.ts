@@ -4,7 +4,40 @@ import { parseScanResponse } from '../src/contracts.ts'
 import { scanResponse } from './fixtures.ts'
 
 test('accepts the public UI Backend response contract', () => {
-  assert.deepEqual(parseScanResponse(scanResponse()), scanResponse())
+  const response = scanResponse()
+  const parsed = parseScanResponse({
+    ...response,
+    evaluation: {
+      ...response.evaluation,
+      evaluatedPolicies: [{ policyId: '10', name: 'Supported version' }],
+      componentsFullyEvaluated: 1,
+    },
+  })
+  assert.deepEqual(parsed, response)
+})
+
+test('ignores response details that do not affect Action behavior', () => {
+  const response = scanResponse()
+  assert.deepEqual(parseScanResponse({
+    ...response,
+    evaluation: {
+      ...response.evaluation,
+      evaluatedPolicies: 'changed unused shape',
+      componentsFullyEvaluated: null,
+    },
+    coverage: {
+      ...response.coverage,
+      mergedResources: [{ changed: 'unused shape' }],
+      skippedResources: [null],
+    },
+  }), {
+    ...response,
+    coverage: {
+      ...response.coverage,
+      mergedResources: [{ changed: 'unused shape' }],
+      skippedResources: [null],
+    },
+  })
 })
 
 test('rejects an inconsistent violation summary', () => {
@@ -18,11 +51,9 @@ test('rejects malformed nested response data', () => {
   const response = scanResponse()
   response.evaluation.componentsWithGaps = [{
     address: 'aws_db_instance.primary',
-    tfType: 'aws_db_instance',
-    tfName: 'primary',
-    policyGaps: [{ policyId: '10', policyName: 'Policy', reason: 'missing_data', fields: ['engine'] }],
+    policyGaps: [{ policyName: 'Policy', reason: 'missing_data' }],
   }]
   const parsed = parseScanResponse(response)
-  assert.deepEqual(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.fields, ['engine'])
+  assert.equal(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.reason, 'missing_data')
   assert.throws(() => parseScanResponse({ ...response, coverage: null }), /coverage/)
 })

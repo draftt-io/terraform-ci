@@ -1,6 +1,6 @@
 import type { FlaggedComponent, ScanResponse } from './contracts.ts'
 import type { AnnotationLevel, CheckAnnotation } from './github-check.ts'
-import type { TerraformSourceLocator } from './source-locator.ts'
+import type { SourceMapping, TerraformComponentReference } from './source-locator.ts'
 
 const MAX_SUMMARY_LENGTH = 60_000
 const MAX_ANNOTATION_MESSAGE_LENGTH = 60_000
@@ -15,9 +15,13 @@ export interface ScanReport {
   warningCount: number
 }
 
+export interface SourceLocator {
+  locate(reference: TerraformComponentReference): Promise<SourceMapping>
+}
+
 export async function buildScanReport(
   response: ScanResponse,
-  locator: TerraformSourceLocator | undefined,
+  locator: SourceLocator | undefined,
   annotationLevel: AnnotationLevel,
   noPoliciesSelected: boolean,
 ): Promise<ScanReport> {
@@ -126,7 +130,14 @@ function formatViolation(component: FlaggedComponent): string {
   lines.push('')
   for (const policy of component.policyComponents) {
     const target = policy.recommendedVersion ?? policy.desiredVersion
-    lines.push(`- ${policy.policyName}: ${policy.status}${target ? `; recommended ${target}` : ''}${policy.hasForceUpgrade ? '; force upgrade reported' : ''}`)
+    const details = [
+      target ? `recommended ${target}` : undefined,
+      policy.hasForceUpgrade ? 'force upgrade reported' : undefined,
+      policy.impendingDate ? `impending date ${policy.impendingDate}` : undefined,
+      policy.outdatedDate ? `outdated date ${policy.outdatedDate}` : undefined,
+      policy.dueDate ? `due date ${policy.dueDate}` : undefined,
+    ].filter((detail): detail is string => detail !== undefined)
+    lines.push(`- ${policy.policyName}: ${policy.status}${details.length > 0 ? `; ${details.join('; ')}` : ''}`)
   }
   return lines.join('\n')
 }
