@@ -101,7 +101,7 @@ function createHarness(options: HarnessOptions = {}): {
   const calls = { readInputs: 0, readPlan: 0, scan: 0 }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
-    apiUrl: 'https://api.draftt.io/ci/scanTerraformPlan',
+    apiUrl: 'https://api.draftt.io/api/v1/ci/scanTerraformPlan',
     apiKey: 'draftt-key',
     githubToken: 'github-token',
     terraformRoot: '.',
