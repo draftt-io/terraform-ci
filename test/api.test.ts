@@ -13,7 +13,7 @@ test('sends the scrubbed request with bearer authentication and parses the respo
     return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
-    const result = await scanTerraformPlan('https://api.draftt.io/api/v1/ci/scanTerraformPlan', 'secret-key', '{"plan":{}}')
+    const result = await scanTerraformPlan('https://api.draftt.io/ci/scanTerraformPlan', 'secret-key', '{"plan":{}}')
     assert.equal(result.summary.hasPolicyViolations, true)
     assert.equal(capturedBody, '{"plan":{}}')
     assert.equal(capturedAuthorization, 'Bearer secret-key')
@@ -23,8 +23,8 @@ test('sends the scrubbed request with bearer authentication and parses the respo
 })
 
 test('rejects insecure or credential-bearing API URLs before making a request', async () => {
-  await assert.rejects(() => scanTerraformPlan('http://api.draftt.io/api/v1/ci/scanTerraformPlan', 'key', '{}'), /must use HTTPS/)
-  await assert.rejects(() => scanTerraformPlan('https://user:password@api.draftt.io/api/v1/ci/scanTerraformPlan', 'key', '{}'), /must not contain credentials/)
+  await assert.rejects(() => scanTerraformPlan('http://api.draftt.io/ci/scanTerraformPlan', 'key', '{}'), /must use HTTPS/)
+  await assert.rejects(() => scanTerraformPlan('https://user:password@api.draftt.io/ci/scanTerraformPlan', 'key', '{}'), /must not contain credentials/)
 })
 
 test('does not include a backend response body in an HTTP error', async () => {
@@ -32,7 +32,7 @@ test('does not include a backend response body in an HTTP error', async () => {
   globalThis.fetch = async () => new Response('{"message":"sensitive backend detail"}', { status: 400 })
   try {
     await assert.rejects(
-      () => scanTerraformPlan('https://api.draftt.io/api/v1/ci/scanTerraformPlan', 'key', '{}'),
+      () => scanTerraformPlan('https://api.draftt.io/ci/scanTerraformPlan', 'key', '{}'),
       (error: unknown) => error instanceof Error && error.message === 'Draftt rejected the scan request',
     )
   } finally {
