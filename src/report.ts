@@ -1,4 +1,4 @@
-import type { FlaggedComponent, ScanResponse } from './contracts.ts'
+import type { FlaggedComponent, PolicyHit, ScanResponse } from './contracts.ts'
 import type { AnnotationLevel, CheckAnnotation } from './github-check.ts'
 import type { SourceMapping, TerraformComponentReference } from './source-locator.ts'
 
@@ -125,21 +125,67 @@ function appendCoverage(lines: string[], response: ScanResponse): void {
 }
 
 function formatViolation(component: FlaggedComponent): string {
-  const lines = [`Terraform resource: ${component.address}`, `Component: ${component.technology} ${component.type}`]
+  const count = component.policyComponents.length
+  const lines = [`${count} ${plural(count, 'policy violation')}`, '', `Resource: ${markdownCode(component.address)}`]
+  const componentValues = distinctComponentValues(component)
+  if (componentValues.length > 0) lines.push(`Component: ${componentValues.map(inline).join(' · ')}`)
   if (component.currentVersion) lines.push(`Current version: ${component.currentVersion}`)
-  lines.push('')
-  for (const policy of component.policyComponents) {
-    const target = policy.recommendedVersion ?? policy.desiredVersion
-    const details = [
-      target ? `recommended ${target}` : undefined,
-      policy.hasForceUpgrade ? 'force upgrade reported' : undefined,
-      policy.impendingDate ? `impending date ${policy.impendingDate}` : undefined,
-      policy.outdatedDate ? `outdated date ${policy.outdatedDate}` : undefined,
-      policy.dueDate ? `due date ${policy.dueDate}` : undefined,
-    ].filter((detail): detail is string => detail !== undefined)
-    lines.push(`- ${policy.policyName}: ${policy.status}${details.length > 0 ? `; ${details.join('; ')}` : ''}`)
+
+  for (const group of groupPoliciesByStatus(component.policyComponents)) {
+    lines.push('', `${statusHeading(group.status)} policies`)
+    for (const policy of group.policies) {
+      lines.push(`- ${markdownCode(policy.policyName)}`)
+      const details = policyDetails(policy)
+      if (details.length > 0) lines.push(`  ${details.join(' · ')}`)
+    }
   }
   return lines.join('\n')
+}
+
+function distinctComponentValues(component: FlaggedComponent): string[] {
+  const seen = new Set([comparisonKey(component.tfType)])
+  const values: string[] = []
+  for (const value of [component.technology, component.type]) {
+    const key = comparisonKey(value)
+    if (key.length === 0 || seen.has(key)) continue
+    seen.add(key)
+    values.push(value)
+  }
+  return values
+}
+
+function comparisonKey(value: string): string {
+  return value.toLowerCase().replace(/[-_\s]+/g, '')
+}
+
+function groupPoliciesByStatus(policies: PolicyHit[]): Array<{ status: string; policies: PolicyHit[] }> {
+  const groups = new Map<string, { status: string; policies: PolicyHit[] }>()
+  for (const policy of policies) {
+    const key = policy.status.trim().toLowerCase()
+    const group = groups.get(key)
+    if (group) {
+      group.policies.push(policy)
+    } else {
+      groups.set(key, { status: policy.status, policies: [policy] })
+    }
+  }
+  return [...groups.values()]
+}
+
+function statusHeading(status: string): string {
+  const normalized = status.trim().toLowerCase()
+  return normalized.length === 0 ? 'Unknown status' : normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function policyDetails(policy: PolicyHit): string[] {
+  return [
+    policy.recommendedVersion ? `Recommended: ${inline(policy.recommendedVersion)}` : undefined,
+    !policy.recommendedVersion && policy.desiredVersion ? `Desired: ${inline(policy.desiredVersion)}` : undefined,
+    policy.hasForceUpgrade ? 'Force upgrade reported' : undefined,
+    policy.impendingDate ? `Impending: ${inline(policy.impendingDate)}` : undefined,
+    policy.outdatedDate ? `Outdated: ${inline(policy.outdatedDate)}` : undefined,
+    policy.dueDate ? `Due: ${inline(policy.dueDate)}` : undefined,
+  ].filter((detail): detail is string => detail !== undefined)
 }
 
 function inlinePolicyNames(component: FlaggedComponent): string {
@@ -148,6 +194,14 @@ function inlinePolicyNames(component: FlaggedComponent): string {
 
 function inline(value: string): string {
   return value.replace(/[\r\n]+/g, ' ').replace(/`/g, "'")
+}
+
+function markdownCode(value: string): string {
+  const singleLine = value.replace(/[\r\n]+/g, ' ')
+  const longestRun = Math.max(0, ...Array.from(singleLine.matchAll(/`+/g), (match) => match[0].length))
+  const delimiter = '`'.repeat(longestRun + 1)
+  const padding = singleLine.startsWith('`') || singleLine.endsWith('`') ? ' ' : ''
+  return `${delimiter}${padding}${singleLine}${padding}${delimiter}`
 }
 
 function truncate(value: string, maximum: number): string {

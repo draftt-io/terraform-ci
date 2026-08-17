@@ -22,11 +22,15 @@ test('creates one source annotation per violating component', async () => {
       annotation_level: 'warning',
       title: 'Draftt policy violation: aws_db_instance',
       message: [
-        'Terraform resource: aws_db_instance.primary',
-        'Component: RDS postgres',
+        '1 policy violation',
+        '',
+        'Resource: `aws_db_instance.primary`',
+        'Component: RDS · postgres',
         'Current version: 14',
         '',
-        '- Supported version: outdated; recommended 16',
+        'Outdated policies',
+        '- `Supported version`',
+        '  Recommended: 16',
       ].join('\n'),
     })
   } finally {
@@ -49,12 +53,67 @@ test('includes available lifecycle dates in violation annotations', async () => 
     await writeFile(path.join(repository, 'main.tf'), 'resource "aws_db_instance" "primary" {}\n')
     const locator = await TerraformSourceLocator.create({ workspaceRoot: repository, terraformRoot: '.' })
     const annotated = await buildScanReport(response, locator, 'warning', false)
-    assert.match(annotated.annotations[0]?.message ?? '', /impending date 2026-09-01/)
-    assert.match(annotated.annotations[0]?.message ?? '', /outdated date 2027-01-01/)
-    assert.match(annotated.annotations[0]?.message ?? '', /due date 2027-03-01/)
+    assert.match(annotated.annotations[0]?.message ?? '', /Impending: 2026-09-01/)
+    assert.match(annotated.annotations[0]?.message ?? '', /Outdated: 2027-01-01/)
+    assert.match(annotated.annotations[0]?.message ?? '', /Due: 2027-03-01/)
   } finally {
     await rm(repository, { recursive: true, force: true })
   }
+})
+
+test('groups repeated statuses and omits component metadata duplicated by the Terraform type', async () => {
+  const policies = [
+    'tf-e2e-common-environment-production-v1',
+    'tf-e2e-s3-public-access-blocked-v1',
+    'tf-e2e-s3-default-encryption-kms-v1',
+    'tf-e2e-s3-versioning-enabled-v1',
+    'tf-e2e-s3-bucket-key-enabled-v1',
+    'tf-e2e-s3-mfa-delete-enabled-v1',
+  ].map((policyName) => ({ policyName, status: 'Non-Compliant' }))
+  const response = scanResponse({
+    components: [{
+      address: 'aws_s3_bucket.open',
+      tfType: 'aws_s3_bucket',
+      technology: 'aws-s3-bucket',
+      type: 'aws-s3-bucket',
+      currentVersion: '',
+      policyComponents: policies,
+    }],
+  })
+
+  assert.equal(await annotationMessage(response), [
+    '6 policy violations',
+    '',
+    'Resource: `aws_s3_bucket.open`',
+    '',
+    'Non-compliant policies',
+    ...policies.map(({ policyName }) => `- \`${policyName}\``),
+  ].join('\n'))
+})
+
+test('retains distinct derived-component metadata and prints duplicate component values once', async () => {
+  const response = scanResponse({
+    components: [{
+      address: 'aws_instance.web.ebs_block_device[0]',
+      sourceAddress: 'aws_instance.web',
+      tfType: 'aws_ebs_volume',
+      technology: 'storage',
+      type: 'Storage',
+      currentVersion: 'gp3',
+      policyComponents: [{ policyName: 'Encrypted volume', status: 'non-compliant' }],
+    }],
+  })
+
+  assert.equal(await annotationMessage(response), [
+    '1 policy violation',
+    '',
+    'Resource: `aws_instance.web.ebs_block_device[0]`',
+    'Component: storage',
+    'Current version: gp3',
+    '',
+    'Non-compliant policies',
+    '- `Encrypted volume`',
+  ].join('\n'))
 })
 
 test('warns for incomplete results and an explicit empty policy selection', async () => {
@@ -93,3 +152,10 @@ test('bounds long summary sections and reports omitted findings', async () => {
   assert.match(report.summary, /125 additional violations omitted/)
   assert.ok(report.summary.length <= 60_000)
 })
+
+async function annotationMessage(response: ReturnType<typeof scanResponse>): Promise<string> {
+  const report = await buildScanReport(response, {
+    locate: async () => ({ kind: 'found', location: { path: 'main.tf', startLine: 1 } }),
+  }, 'warning', false)
+  return report.annotations[0]?.message ?? ''
+}
