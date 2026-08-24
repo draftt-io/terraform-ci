@@ -211,6 +211,34 @@ test('rejects marked sensitive fields that could be policy evidence', () => {
   assert.throws(() => sanitizePlan(plan), /unsupported sensitive field at before_sensitive\.values\.1/)
 })
 
+test('scrubs provider-marked sensitive fields from real aws, random, helm, and mq resources', () => {
+  const plan = basePlan()
+  const resource = (plan.resource_changes as Array<Record<string, unknown>>)[0]
+  assert.ok(resource)
+  const change = resource.change as Record<string, unknown>
+  change.before = null
+  change.after = {
+    secret_string_wo: 'write-only secret',
+    secret_binary_wo: 'd3JpdGUtb25seQ==',
+    result: 'generated-password',
+    repository_password: 'helm-repo-password',
+    user: [{ username: 'mq-admin', password: 'mq-password' }],
+    engine_type: 'ActiveMQ',
+  }
+  change.before_sensitive = false
+  change.after_sensitive = {
+    secret_string_wo: true,
+    secret_binary_wo: true,
+    result: true,
+    repository_password: true,
+    user: [true],
+  }
+
+  const sanitized = sanitizePlan(plan)
+  const projected = sanitized.resource_changes[0]?.change as Record<string, Record<string, unknown>>
+  assert.deepEqual(projected.after, { engine_type: 'ActiveMQ' })
+})
+
 test('rejects an unmarked recognized credential left in a retained field', () => {
   const plan = basePlan()
   const resource = (plan.resource_changes as Array<Record<string, unknown>>)[1]
