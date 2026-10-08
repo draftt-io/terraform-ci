@@ -1,12 +1,15 @@
 // GitHub's official toolkit handles Action inputs, masking, outputs, summaries, and failures.
 import * as core from '@actions/core'
+import { context } from '@actions/github'
 import { scanTerraformPlan } from './api.ts'
 import { CheckPublisher, getHeadSha, isExternalFork } from './github-check.ts'
 import { readInputs } from './inputs.ts'
 import { completedConclusion, scanErrorConclusion } from './outcome.ts'
 import { readAndSanitizePlan, serializeScanRequest } from './plan.ts'
 import { buildScanReport } from './report.ts'
+import { buildGitHubContext } from './request.ts'
 import { run } from './run.ts'
+import { buildSourceMap } from './source-map.ts'
 import { TerraformSourceLocator } from './source-locator.ts'
 import { inspectWorkspaceForSourceMapping } from './workspace.ts'
 
@@ -24,7 +27,7 @@ void run({
   },
   isExternalFork,
   getHeadSha,
-  createPublisher: (token, headSha) => new CheckPublisher(token, headSha),
+  createPublisher: (token, headSha, name) => new CheckPublisher(token, headSha, name),
   readInputs,
   readAndSanitizePlan,
   serializeScanRequest,
@@ -32,6 +35,10 @@ void run({
   createSourceLocator: async (workspaceRoot, terraformRoot) => (
     await TerraformSourceLocator.create({ workspaceRoot, terraformRoot })
   ),
+  buildSourceMap,
+  buildGitHubContext,
+  eventPayload: () => context.payload as Record<string, unknown>,
+  env: () => process.env,
   scanTerraformPlan,
   buildScanReport,
   completedConclusion,
