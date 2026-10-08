@@ -13,7 +13,7 @@ test('accepts the public UI Backend response contract', () => {
       componentsFullyEvaluated: 1,
     },
   })
-  assert.deepEqual(parsed, response)
+  assert.deepEqual(parsed, { ...response, evaluation: { ...response.evaluation, evaluatedPolicies: [{ policyId: '10', name: 'Supported version' }] } })
 })
 
 test('ignores response details that do not affect Action behavior', () => {
@@ -78,4 +78,20 @@ test('treats a null publishError from the server as no publish error', () => {
   assert.equal(parsed.publishError, undefined)
   assert.equal('publishError' in parsed, false)
   assert.equal(parsed.annotationCount, 0)
+})
+
+test('keeps the fields the report renders and drops malformed entries of the optional ones', () => {
+  const response = scanResponse()
+  const parsed = parseScanResponse({
+    ...response,
+    components: [{ ...response.components[0], policyComponents: [{ policyId: '10', policyName: 'Supported version', name: 'primary', status: 'outdated', currentVersion: '14' }] }],
+    evaluation: {
+      evaluatedPolicies: [{ policyId: '10', name: 'Supported version' }, { policyId: 7 }],
+      unevaluatedPolicies: [],
+      componentsWithGaps: [{ address: 'aws_db_instance.replica', policyGaps: [{ policyName: 'Version', reason: 'missing_data', missingAttributes: ['engine_version', 3] }] }],
+    },
+  })
+  assert.deepEqual(parsed.components[0]?.policyComponents[0], { policyId: '10', policyName: 'Supported version', name: 'primary', status: 'outdated', currentVersion: '14' })
+  assert.deepEqual(parsed.evaluation.evaluatedPolicies, [{ policyId: '10', name: 'Supported version' }])
+  assert.deepEqual(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.missingAttributes, ['engine_version'])
 })

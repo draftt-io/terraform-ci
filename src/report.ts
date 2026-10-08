@@ -1,11 +1,40 @@
+// Redesigned in draftt-ci Task 9b. Only the block above the "Shared renderer" marker is
+// Action-specific; test/fixtures/parity.json pins the output of the rest.
 import type { FlaggedComponent, PolicyHit, ScanResponse } from './contracts.ts'
 import type { AnnotationLevel, CheckAnnotation } from './github-check.ts'
 import type { SourceMapping, TerraformComponentReference } from './source-locator.ts'
 
+export interface SourceLocator {
+  locate(reference: TerraformComponentReference): Promise<SourceMapping>
+}
+
+// ---- Shared renderer: byte-identical in draftt-ci src/reporters/scanReport.ts and terraform-ci src/report.ts from this line down. ----
+
 const MAX_SUMMARY_LENGTH = 60_000
 const MAX_ANNOTATION_MESSAGE_LENGTH = 60_000
 const MAX_SECTION_ITEMS = 25
-const MAX_SUMMARY_LINE_LENGTH = 500
+export const MAX_SUMMARY_LINE_LENGTH = 500
+export const MAX_VALUE_CHARS = 200
+// The summary is built from whole lines up to this many characters. The 60,000 summary cut and the
+// 65,000 comment cut are backstops only: neither can be reached, so neither can open a code span.
+export const SUMMARY_BUDGET = 55_000
+export const MAX_TABLE_RESOURCES = 25
+export const MAX_ROWS_PER_RESOURCE = 10
+// GitHub accepts at most 500 annotations per check run; the most urgent resources get them.
+export const MAX_PUBLISHED_ANNOTATIONS = 500
+// Room kept for the collapsed lists so a long table can never squeeze them out entirely.
+const INCOMPLETE_RESERVE = 12_000
+const OVERFLOW_RESERVE = 1_000
+export const DOCS_URL = 'https://docs.draftt.io/ci'
+const GITHUB_WEB_URL = 'https://github.com'
+export const NO_VIOLATIONS_TITLE = 'No policy violations found'
+export const NO_POLICIES_TITLE = 'No policies evaluated'
+const NO_TRACKED_RESOURCES = 'No Draftt-tracked resources in this plan.'
+const DITTO = '″'
+const NO_SOURCE_LINE = 'no source line found'
+const NO_DATE = '9999-99-99'
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}/
+const OTHER_STATUS_RANK = 3
 
 export interface ScanReport {
   title: string
@@ -15,205 +44,602 @@ export interface ScanReport {
   warningCount: number
 }
 
-export interface SourceLocator {
-  locate(reference: TerraformComponentReference): Promise<SourceMapping>
+// Trusted context only (the resolved repository and the validated head SHA): file links are built
+// from it, never from a URL in the scan response or the plan.
+export interface ReportRepository {
+  owner: string
+  repo: string
+  headSha: string
 }
+
+export interface ReportOptions {
+  repository?: ReportRepository
+}
+
+interface SourceLocation {
+  path: string
+  startLine: number
+}
+
+interface ResourceEntry {
+  component: FlaggedComponent
+  location?: SourceLocation
+  hits: PolicyHit[]
+  rank: number
+  sortDate: string
+}
+
+interface HitGroup {
+  hit: PolicyHit
+  count: number
+}
+
+const KNOWN_STATUSES = new Map<string, { label: string; rank: number }>([
+  ['outdated', { label: 'Outdated', rank: 0 }],
+  ['noncompliant', { label: 'Non-compliant', rank: 1 }],
+  ['impending', { label: 'Impending', rank: 2 }],
+])
+
+const UNEVALUATED_REASONS = new Map<string, string>([
+  ['not_found', 'This policy was not found in your organization'],
+  ['inactive', 'This policy is inactive'],
+  ['unsupported_policy', 'This policy type is not supported in CI scans yet'],
+  ['error', 'Draftt could not evaluate this policy'],
+])
+
+const GAP_REASONS = new Map<string, string>([
+  ['missing_data', 'The plan does not contain the data this policy needs'],
+  ['error', 'Draftt could not evaluate this policy for this resource'],
+])
+
+const UNMAPPED_REASONS = new Map<string, string>([
+  ['unknown_technology', 'Draftt does not track this resource type yet'],
+  ['no_version', 'The plan has no version for this resource'],
+  ['orphaned_child', 'Its parent resource is not in the plan'],
+  ['unresolvable_version', 'Draftt could not resolve the version from the plan'],
+])
 
 export async function buildScanReport(
   response: ScanResponse,
   locator: SourceLocator | undefined,
   annotationLevel: AnnotationLevel,
   noPoliciesSelected: boolean,
+  options: ReportOptions = {},
 ): Promise<ScanReport> {
-  const annotations: CheckAnnotation[] = []
-  const unresolved: FlaggedComponent[] = []
+  const resources: ResourceEntry[] = []
   for (const component of response.components) {
     const mapping = locator ? await locator.locate(component) : undefined
-    if (!mapping || mapping.kind === 'unresolved') {
-      unresolved.push(component)
+    const hits = [...component.policyComponents].sort(compareHits)
+    const rank = Math.min(OTHER_STATUS_RANK, ...hits.map((hit) => statusRank(hit.status)))
+    resources.push({
+      component,
+      ...(mapping?.kind === 'found' ? { location: { path: mapping.location.path, startLine: mapping.location.startLine } } : {}),
+      hits,
+      rank,
+      // The date of the hits that set the rank: a later, less urgent hit never pulls a resource up.
+      sortDate: earliestDate(hits.filter((hit) => statusRank(hit.status) === rank).map(hitDate)) ?? NO_DATE,
+    })
+  }
+  resources.sort(compareResources)
+
+  const annotations: CheckAnnotation[] = []
+  let unannotated = 0
+  for (const resource of resources) {
+    if (!resource.location) continue
+    if (annotations.length >= MAX_PUBLISHED_ANNOTATIONS) {
+      unannotated += 1
       continue
     }
     annotations.push({
-      path: mapping.location.path,
-      start_line: mapping.location.startLine,
-      end_line: mapping.location.startLine,
+      path: resource.location.path,
+      start_line: resource.location.startLine,
+      end_line: resource.location.startLine,
       annotation_level: annotationLevel,
-      title: truncate(`Draftt policy violation: ${component.tfType}`, 255),
-      message: truncate(formatViolation(component), MAX_ANNOTATION_MESSAGE_LENGTH),
+      title: truncate(`Draftt policy violation: ${resource.component.tfType}`, 255),
+      message: truncateBytes(formatViolation(resource), MAX_ANNOTATION_MESSAGE_LENGTH),
     })
   }
 
-  const evaluationGapCount = response.evaluation.componentsWithGaps.reduce(
-    (count, component) => count + component.policyGaps.length,
-    0,
+  const gapCount = response.evaluation.componentsWithGaps.reduce((count, component) => count + component.policyGaps.length, 0)
+  const incompleteCount = response.evaluation.unevaluatedPolicies.length + gapCount + response.coverage.unmappedResources.length
+  const warningCount = incompleteCount + (noPoliciesSelected ? 1 : 0)
+  const violationTotal = resources.reduce((count, resource) => count + resource.hits.length, 0)
+  // Only when something was mapped: a plan with no Draftt-tracked resource gets the zero-violation layout.
+  const noPoliciesEvaluated =
+    resources.length === 0 && response.summary.componentsMapped > 0 && (noPoliciesSelected || response.evaluation.evaluatedPolicies?.length === 0)
+
+  let title: string
+  let head: string[]
+  if (noPoliciesEvaluated) {
+    title = NO_POLICIES_TITLE
+    head = noPoliciesAlert(noPoliciesSelected)
+  } else if (resources.length === 0) {
+    title = incompleteCount > 0 ? `${NO_VIOLATIONS_TITLE} (${incompleteText(incompleteCount)})` : NO_VIOLATIONS_TITLE
+    head = [checkedLine(response)]
+  } else {
+    title = `${violationTotal} policy ${plural(violationTotal, 'violation')} on ${resources.length} ${plural(resources.length, 'resource')}`
+    head = [countsLine(resources, incompleteCount)]
+  }
+
+  const note =
+    unannotated > 0
+      ? [
+          `Not annotated in Files changed: ${unannotated} ${plural(unannotated, 'resource')} with violations (GitHub accepts at most ${MAX_PUBLISHED_ANNOTATIONS} annotations per check).`,
+        ]
+      : []
+  const footer = [footerLine(response, resources.length > 0 ? annotations.length : undefined)]
+
+  // Budgeted by whole lines, most important first: the table, then the resources it could not
+  // hold, then the incomplete checks. Each collapsed block closes its own <details>.
+  const incomplete = incompleteSection(response, incompleteCount)
+  const fixed = blockSize(head) + blockSize(note) + blockSize(footer)
+  const incompleteRoom = incomplete ? Math.min(INCOMPLETE_RESERVE, blockSize(detailsBlock(incomplete, Number.MAX_SAFE_INTEGER))) : 0
+  const overflowRoom = resources.length > 0 ? OVERFLOW_RESERVE : 0
+  const table = violationTable(resources, options.repository, SUMMARY_BUDGET - fixed - incompleteRoom - overflowRoom)
+  const overflow = overflowBlock(
+    resources.filter((resource) => !table.shown.has(resource)),
+    SUMMARY_BUDGET - fixed - incompleteRoom - blockSize(table.lines),
   )
-  const warningCount = response.evaluation.unevaluatedPolicies.length
-    + evaluationGapCount
-    + response.coverage.unmappedResources.length
-    + (noPoliciesSelected ? 1 : 0)
-  const title = response.components.length === 0
-    ? 'No policy violations found'
-    : `${response.components.length} ${plural(response.components.length, 'resource')} with policy violations`
+  const incompleteLines = incomplete ? detailsBlock(incomplete, SUMMARY_BUDGET - fixed - blockSize(table.lines) - blockSize(overflow)) : []
 
-  const lines = [
-    `Scanned **${response.summary.managedResourcesInPlan}** managed ${plural(response.summary.managedResourcesInPlan, 'resource')}; Draftt mapped **${response.summary.componentsMapped}** ${plural(response.summary.componentsMapped, 'component')}.`,
-    '',
-    `Clear violations: **${response.components.length}**  `,
-    `Incomplete-result warnings: **${warningCount}**  `,
-    `Source annotations: **${annotations.length}**`,
-  ]
-
-  if (noPoliciesSelected) lines.push('', '> Warning: `policy-ids` selected 0 policies. No policy was evaluated by request.')
-  appendViolations(lines, response.components, unresolved)
-  appendEvaluationWarnings(lines, response)
-  appendCoverage(lines, response)
-
+  const blocks = [head, table.lines, overflow, incompleteLines, note, footer].filter((block) => block.length > 0)
   return {
     title,
-    summary: truncate(lines.join('\n'), MAX_SUMMARY_LENGTH),
+    summary: truncate(blocks.map((block) => block.join('\n')).join('\n\n'), MAX_SUMMARY_LENGTH),
     annotations,
-    violationCount: response.components.length,
+    violationCount: resources.length,
     warningCount,
   }
 }
 
-function appendViolations(lines: string[], components: FlaggedComponent[], unresolved: FlaggedComponent[]): void {
-  if (components.length === 0) return
-  lines.push('', '### Policy violations')
-  const unresolvedSet = new Set(unresolved)
-  const ordered = [...unresolved, ...components.filter((component) => !unresolvedSet.has(component))]
-  appendLimited(lines, ordered, (component) => `- **${inline(component.address)}:** ${inlinePolicyNames(component)}`, 'violations')
-  if (unresolved.length > 0) {
-    lines.push('', `${unresolved.length} ${plural(unresolved.length, 'violation')} could not be mapped to an exact editable source line. Summary-only violations are listed first.`)
+function noPoliciesAlert(noPoliciesSelected: boolean): string[] {
+  return [
+    '> [!WARNING]',
+    noPoliciesSelected
+      ? "> **No policies were evaluated.** The workflow passes an empty `policy-ids` list. Remove the `policy-ids` input to use your organization's default policies, or list the policy IDs to enforce."
+      : '> **No policies were evaluated.** No active Draftt policy in your organization applies to this plan.',
+  ]
+}
+
+function checkedLine(response: ScanResponse): string {
+  const mapped = response.summary.componentsMapped
+  if (mapped === 0) return NO_TRACKED_RESOURCES
+  const subject = `${mapped} ${plural(mapped, 'component')} checked`
+  const policies = response.evaluation.evaluatedPolicies
+  if (!policies || policies.length === 0) return `${subject}.`
+  return joinWithinLine(
+    `${subject} against ${policies.length} ${plural(policies.length, 'policy', 'policies')}: `,
+    policies.map((policy) => markdownCode(policy.name)),
+  )
+}
+
+function countsLine(resources: ResourceEntry[], incompleteCount: number): string {
+  const hits = resources.flatMap((resource) => resource.hits)
+  const counts = statusCounts(hits)
+  const parts = counts.length > 0 ? [counts.map((entry) => `**${entry}**`).join(', ')] : []
+  const due = earliestDate(hits.map(isoDueDate))
+  if (due) parts.push(`earliest due ${markdownCode(due)}`)
+  if (incompleteCount > 0) parts.push(incompleteText(incompleteCount))
+  return parts.join(' · ')
+}
+
+function incompleteText(count: number): string {
+  return `${count} ${plural(count, 'check')} incomplete`
+}
+
+// "8 outdated", "4 impending", ... in urgency order; statuses outside the known set count as "other".
+function statusCounts(hits: PolicyHit[]): string[] {
+  const counts: string[] = []
+  for (const [key, status] of KNOWN_STATUSES) {
+    const count = hits.filter((hit) => statusKey(hit.status) === key).length
+    if (count > 0) counts.push(`${count} ${status.label.toLowerCase()}`)
+  }
+  const other = hits.filter((hit) => !KNOWN_STATUSES.has(statusKey(hit.status))).length
+  if (other > 0) counts.push(`${other} other`)
+  return counts
+}
+
+function footerLine(response: ScanResponse, annotated: number | undefined): string {
+  const { managedResourcesInPlan, componentsMapped } = response.summary
+  const parts = [
+    `${managedResourcesInPlan} ${plural(managedResourcesInPlan, 'resource')} in plan`,
+    `${componentsMapped} mapped to Draftt ${plural(componentsMapped, 'component')}`,
+  ]
+  const merged = response.coverage.mergedResources.length
+  const skipped = response.coverage.skippedResources.length
+  if (merged > 0) parts.push(`${merged} merged into a parent`)
+  if (skipped > 0) parts.push(`${skipped} skipped`)
+  if (annotated !== undefined) parts.push(`${annotated} ${plural(annotated, 'resource')} annotated in Files changed`)
+  parts.push(`[What these statuses mean](${DOCS_URL})`)
+  return `<sub>${parts.join(' · ')}</sub>`
+}
+
+// Resources whose rows do not fit (past the budget, past 25, or a row over the line limit even with
+// every detail dropped) are left out of `shown` and listed in the overflow block instead.
+function violationTable(
+  resources: ResourceEntry[],
+  repository: ReportRepository | undefined,
+  room: number,
+): { lines: string[]; shown: Set<ResourceEntry> } {
+  const lines = ['| Resource | Status | Policy | Change needed |', '|---|---|---|---|']
+  const shown = new Set<ResourceEntry>()
+  let used = blockSize(lines)
+  for (const resource of resources) {
+    if (shown.size >= MAX_TABLE_RESOURCES) break
+    const rows = resourceRows(resource, repository)
+    if (!rows) continue
+    const size = rows.reduce((total, row) => total + row.length + 1, 0)
+    if (used + size > room) break
+    lines.push(...rows)
+    used += size
+    shown.add(resource)
+  }
+  return shown.size === 0 ? { lines: [], shown } : { lines, shown }
+}
+
+// One row per policy hit (identical hits collapse into one row with ×N); continuation rows show ″.
+// Undefined when any row cannot fit the line limit: the resource then goes to the overflow list.
+function resourceRows(resource: ResourceEntry, repository: ReportRepository | undefined): string[] | undefined {
+  const named = hasDistinctNames(resource.hits)
+  const groups = groupHits(resource.hits, named)
+  if (groups.length === 0) {
+    const row = fitRow(resourceCells(resource, repository), '—', ['—', '—'], ['—', '—', '—'])
+    return row === undefined ? undefined : [row]
+  }
+  const rows: string[] = []
+  for (const [index, group] of groups.slice(0, MAX_ROWS_PER_RESOURCE).entries()) {
+    const resourceCell = index === 0 ? resourceCells(resource, repository) : ([DITTO, DITTO, DITTO] as const)
+    const change = changeText(group.hit, resource.component, tableCode)
+    const row = fitRow(resourceCell, statusCell(group.hit.status), policyCells(group, named), [change.full, change.short, '—'])
+    if (row === undefined) return undefined
+    rows.push(row)
+  }
+  const hidden = groups.slice(MAX_ROWS_PER_RESOURCE).reduce((total, group) => total + group.count, 0)
+  if (hidden > 0) rows.push(`| ${DITTO} | | +${hidden} more | |`)
+  return rows
+}
+
+// Rows are built from whole cells: a row past the line limit drops detail (the link, the component
+// name, the from-version and date, the source line, then the target version) instead of being cut.
+// A row that still does not fit is undefined, never cut and never an anonymous placeholder.
+const ROW_STEPS: ReadonlyArray<readonly [0 | 1 | 2, 0 | 1, 0 | 1 | 2]> = [
+  [0, 0, 0],
+  [1, 0, 0],
+  [1, 1, 0],
+  [1, 1, 1],
+  [2, 1, 1],
+  [2, 1, 2],
+]
+
+function fitRow(
+  resource: readonly [string, string, string],
+  status: string,
+  policy: readonly [string, string],
+  change: readonly [string, string, string],
+): string | undefined {
+  for (const [r, p, c] of ROW_STEPS) {
+    const row = `| ${resource[r]} | ${status} | ${policy[p]} | ${change[c]} |`
+    if (row.length <= MAX_SUMMARY_LINE_LENGTH) return row
+  }
+  return undefined
+}
+
+function resourceCells(resource: ResourceEntry, repository: ReportRepository | undefined): readonly [string, string, string] {
+  const address = tableCode(resource.component.address)
+  if (!resource.location) return [`${address}<br>${NO_SOURCE_LINE}`, `${address}<br>${NO_SOURCE_LINE}`, address]
+  const where = tableCode(`${resource.location.path}:${resource.location.startLine}`)
+  const plain = `${address}<br>${where}`
+  const linked = repository && linkablePath(resource.location.path)
+  return [linked ? `${address}<br>[${where}](${sourceUrl(repository, resource.location)})` : plain, plain, address]
+}
+
+function statusCell(status: string): string {
+  return KNOWN_STATUSES.get(statusKey(status))?.label ?? tableCode(status)
+}
+
+function policyCells(group: HitGroup, named: boolean): readonly [string, string] {
+  const count = group.count > 1 ? ` ×${group.count}` : ''
+  const policy = tableCode(group.hit.policyName)
+  const withName = named && group.hit.name ? `${policy} · ${tableCode(group.hit.name)}` : policy
+  return [`${withName}${count}`, `${policy}${count}`]
+}
+
+// "from → to by date, forced upgrade" from the hit; `code` is tableCode in the summary and
+// plainValue in an annotation.
+function changeText(hit: PolicyHit, component: FlaggedComponent, code: (value: string) => string): { full: string; short: string } {
+  const target = hit.recommendedVersion ?? hit.desiredVersion
+  const from = hit.currentVersion || component.currentVersion
+  const parts: string[] = []
+  if (target !== undefined) parts.push(from ? `${code(from)} → ${code(target)}` : `→ ${code(target)}`)
+  if (hit.dueDate !== undefined) parts.push(`by ${code(hit.dueDate)}`)
+  else if (hit.outdatedDate !== undefined && statusKey(hit.status) !== 'outdated') parts.push(`before ${code(hit.outdatedDate)}`)
+  let full = parts.join(' ')
+  if (hit.hasForceUpgrade) full = full ? `${full}, forced upgrade` : 'Forced upgrade'
+  return { full: full || '—', short: target !== undefined ? `→ ${code(target)}` : '—' }
+}
+
+// Resources the table could not hold: unmapped first, because they have no annotation either.
+function overflowBlock(resources: ResourceEntry[], room: number): string[] {
+  if (resources.length === 0) return []
+  const unmapped = resources.filter((resource) => !resource.location)
+  const ordered = [...unmapped, ...resources.filter((resource) => resource.location)]
+  const noun = `${resources.length} more ${plural(resources.length, 'resource')} with violations`
+  const summary = unmapped.length > 0 ? `${noun} (${unmapped.length} without a source line)` : noun
+  const rows = ordered.map((resource) => ({ text: overflowLine(resource), entries: 1 }))
+  return detailsBlock({ summary, header: [], rows, more: (count) => `- … ${count} more not shown` }, room)
+}
+
+function overflowLine(resource: ResourceEntry): string {
+  const due = earliestDate(resource.hits.map(isoDueDate))
+  const details = [statusCounts(resource.hits).join(', '), ...(due ? [`earliest due ${markdownCode(due)}`] : [])].join(', ')
+  const where = resource.location ? '' : ` · ${NO_SOURCE_LINE}`
+  const line = `- ${markdownCode(resource.component.address)}: ${details}${where}`
+  // The entry is never dropped: an address too long for the line is replaced, its counts are kept.
+  return line.length <= MAX_SUMMARY_LINE_LENGTH ? line : `- (address longer than the line limit): ${details}${where}`
+}
+
+interface DetailsSection {
+  summary: string
+  header: string[]
+  rows: SectionRow[]
+  more: (count: number) => string
+}
+
+// A row and the number of entries it stands for: one, or N for a "… N more <label>" row.
+interface SectionRow {
+  text: string
+  entries: number
+}
+
+function incompleteSection(response: ScanResponse, incompleteCount: number): DetailsSection | undefined {
+  if (incompleteCount === 0) return undefined
+  const { unevaluatedPolicies, componentsWithGaps } = response.evaluation
+  const unmapped = response.coverage.unmappedResources
+  const gaps = componentsWithGaps.flatMap((component) => component.policyGaps.map((gap) => ({ address: component.address, gap })))
+  const parts = [
+    ...(unevaluatedPolicies.length > 0
+      ? [`${unevaluatedPolicies.length} ${plural(unevaluatedPolicies.length, 'policy', 'policies')} not evaluated`]
+      : []),
+    ...(gaps.length > 0 ? [`${gaps.length} resource ${plural(gaps.length, 'check')} without a result`] : []),
+    ...(unmapped.length > 0 ? [`${unmapped.length} ${plural(unmapped.length, 'resource')} not tracked by Draftt`] : []),
+  ]
+  const rows = [
+    ...limitRows(
+      unevaluatedPolicies.map((policy) =>
+        fitLine([`| Policy ${tableCode(policy.name ?? policy.policyId)} | ${reasonText(UNEVALUATED_REASONS, policy.reason)} |`]),
+      ),
+      'policies',
+    ),
+    ...limitRows(
+      gaps.map(({ address, gap }) => {
+        const subject = `${tableCode(address)} · ${tableCode(gap.policyName)}`
+        const reason = reasonText(GAP_REASONS, gap.reason)
+        const missing = gap.reason === 'missing_data' && gap.missingAttributes && gap.missingAttributes.length > 0 ? gap.missingAttributes : undefined
+        return fitLine([
+          ...(missing ? [joinWithinLine(`| ${subject} | The plan does not contain `, missing.map(tableCode), ' |')] : []),
+          `| ${subject} | ${reason} |`,
+        ])
+      }),
+      'resource checks',
+    ),
+    ...limitRows(
+      unmapped.map((resource) => fitLine([`| ${tableCode(resource.address)} | ${reasonText(UNMAPPED_REASONS, resource.reason)} |`])),
+      'resources',
+    ),
+  ]
+  return {
+    summary: `<strong>${incompleteText(incompleteCount)}</strong>: ${parts.join(', ')}`,
+    header: ['| Not checked | Why |', '|---|---|'],
+    rows,
+    more: (count) => `| … ${count} more not shown | |`,
   }
 }
 
-function appendEvaluationWarnings(lines: string[], response: ScanResponse): void {
-  if (response.evaluation.unevaluatedPolicies.length > 0) {
-    lines.push('', '### Unevaluated policies')
-    appendLimited(
-      lines,
-      response.evaluation.unevaluatedPolicies,
-      (policy) => `- ${inline(policy.name ?? `Policy ${policy.policyId}`)}: ${inline(policy.reason)}`,
-      'unevaluated policies',
-    )
-  }
-  if (response.evaluation.componentsWithGaps.length > 0) {
-    lines.push('', '### Components with evaluation gaps')
-    appendLimited(lines, response.evaluation.componentsWithGaps, (component) => {
-      const gaps = component.policyGaps.map((gap) => `${gap.policyName} (${gap.reason})`).join(', ')
-      return `- **${inline(component.address)}:** ${inline(gaps)}`
-    }, 'components with gaps')
-  }
+function limitRows(rows: string[], label: string): SectionRow[] {
+  const shown = rows.slice(0, MAX_SECTION_ITEMS).map((text) => ({ text, entries: 1 }))
+  const omitted = rows.length - shown.length
+  return omitted > 0 ? [...shown, { text: `| … ${omitted} more ${label} | |`, entries: omitted }] : shown
 }
 
-function appendCoverage(lines: string[], response: ScanResponse): void {
-  if (response.coverage.unmappedResources.length > 0) {
-    lines.push('', '### Unmapped resources')
-    appendLimited(
-      lines,
-      response.coverage.unmappedResources,
-      (resource) => `- **${inline(resource.address)}:** ${inline(resource.reason)}`,
-      'unmapped resources',
-    )
-  }
-  if (response.coverage.mergedResources.length > 0 || response.coverage.skippedResources.length > 0) {
-    lines.push('', '### Other coverage')
-    lines.push(`Merged supporting resources: **${response.coverage.mergedResources.length}**  `)
-    lines.push(`Intentionally skipped resources: **${response.coverage.skippedResources.length}**`)
-  }
+// The first candidate within the line limit; never a cut line.
+function fitLine(candidates: string[]): string {
+  return (
+    candidates.find((line) => line.length <= MAX_SUMMARY_LINE_LENGTH) ?? `| … entry omitted (longer than ${MAX_SUMMARY_LINE_LENGTH} characters) | |`
+  )
 }
 
-function formatViolation(component: FlaggedComponent): string {
-  const count = component.policyComponents.length
-  const lines = [`${count} ${plural(count, 'policy violation')}`, '', `Resource: ${markdownCode(component.address)}`]
-  const componentValues = distinctComponentValues(component)
-  if (componentValues.length > 0) lines.push(`Component: ${componentValues.map(inline).join(' · ')}`)
-  if (component.currentVersion) lines.push(`Current version: ${component.currentVersion}`)
+function reasonText(known: Map<string, string>, reason: string): string {
+  return known.get(reason) ?? tableCode(reason)
+}
 
-  for (const group of groupPoliciesByStatus(component.policyComponents)) {
-    lines.push('', `${statusHeading(group.status)} policies`)
-    for (const policy of group.policies) {
-      lines.push(`- ${markdownCode(policy.policyName)}`)
-      const details = policyDetails(policy)
-      if (details.length > 0) lines.push(`  ${details.join(' · ')}`)
-    }
+// A collapsed section that fits `room` characters: whole rows only, then "… N more not shown",
+// and always closed with </details>. N counts entries, so a cut "… N more <label>" row adds its N.
+function detailsBlock(section: DetailsSection, room: number): string[] {
+  const open = [`<details><summary>${section.summary}</summary>`, '', ...section.header]
+  const close = ['', '</details>']
+  const lines = [...open]
+  const total = section.rows.reduce((sum, row) => sum + row.entries, 0)
+  let used = blockSize(open) + blockSize(close) + section.more(total).length + 1
+  let shown = 0
+  for (const row of section.rows) {
+    if (used + row.text.length + 1 > room) break
+    lines.push(row.text)
+    used += row.text.length + 1
+    shown += row.entries
+  }
+  if (shown < total) lines.push(section.more(total - shown))
+  return [...lines, ...close]
+}
+
+// Annotation messages are plain text on GitHub, so values are capped and kept on one line, never fenced.
+function formatViolation(resource: ResourceEntry): string {
+  const total = resource.hits.length
+  const named = hasDistinctNames(resource.hits)
+  const lines = [`${total} policy ${plural(total, 'violation')} on ${plainValue(resource.component.address)}`]
+  for (const group of groupHits(resource.hits, named)) {
+    const { hit } = group
+    const status = KNOWN_STATUSES.get(statusKey(hit.status))?.label ?? (hit.status.trim() ? plainValue(hit.status) : 'Unknown status')
+    const policy = named && hit.name ? `${plainValue(hit.policyName)} · ${plainValue(hit.name)}` : plainValue(hit.policyName)
+    lines.push('', `${status}: ${policy}${group.count > 1 ? ` ×${group.count}` : ''}`)
+    const change = changeText(hit, resource.component, plainValue).full
+    if (change !== '—') lines.push(`Change needed: ${change}`)
   }
   return lines.join('\n')
 }
 
-function distinctComponentValues(component: FlaggedComponent): string[] {
-  const seen = new Set([comparisonKey(component.tfType)])
-  const values: string[] = []
-  for (const value of [component.technology, component.type]) {
-    const key = comparisonKey(value)
-    if (key.length === 0 || seen.has(key)) continue
-    seen.add(key)
-    values.push(value)
-  }
-  return values
+function hasDistinctNames(hits: PolicyHit[]): boolean {
+  return new Set(hits.map((hit) => hit.name ?? '')).size > 1
 }
 
-function comparisonKey(value: string): string {
-  return value.toLowerCase().replace(/[-_\s]+/g, '')
-}
-
-function groupPoliciesByStatus(policies: PolicyHit[]): Array<{ status: string; policies: PolicyHit[] }> {
-  const groups = new Map<string, { status: string; policies: PolicyHit[] }>()
-  for (const policy of policies) {
-    const key = policy.status.trim().toLowerCase()
+function groupHits(hits: PolicyHit[], named: boolean): HitGroup[] {
+  const groups = new Map<string, HitGroup>()
+  for (const hit of hits) {
+    const key = JSON.stringify([
+      hit.policyId ?? hit.policyName,
+      hit.policyName,
+      statusKey(hit.status),
+      named ? (hit.name ?? '') : '',
+      hit.currentVersion ?? '',
+      hit.recommendedVersion ?? hit.desiredVersion ?? '',
+      hit.dueDate ?? '',
+      hit.outdatedDate ?? '',
+      hit.hasForceUpgrade === true,
+    ])
     const group = groups.get(key)
-    if (group) {
-      group.policies.push(policy)
-    } else {
-      groups.set(key, { status: policy.status, policies: [policy] })
-    }
+    if (group) group.count += 1
+    else groups.set(key, { hit, count: 1 })
   }
   return [...groups.values()]
 }
 
-function statusHeading(status: string): string {
-  const normalized = status.trim().toLowerCase()
-  return normalized.length === 0 ? 'Unknown status' : normalized.charAt(0).toUpperCase() + normalized.slice(1)
+function statusKey(status: string): string {
+  return status.toLowerCase().replace(/[-_\s]+/g, '')
 }
 
-function policyDetails(policy: PolicyHit): string[] {
-  return [
-    policy.recommendedVersion ? `Recommended: ${inline(policy.recommendedVersion)}` : undefined,
-    !policy.recommendedVersion && policy.desiredVersion ? `Desired: ${inline(policy.desiredVersion)}` : undefined,
-    policy.hasForceUpgrade ? 'Force upgrade reported' : undefined,
-    policy.impendingDate ? `Impending: ${inline(policy.impendingDate)}` : undefined,
-    policy.outdatedDate ? `Outdated: ${inline(policy.outdatedDate)}` : undefined,
-    policy.dueDate ? `Due: ${inline(policy.dueDate)}` : undefined,
-  ].filter((detail): detail is string => detail !== undefined)
+function statusRank(status: string): number {
+  return KNOWN_STATUSES.get(statusKey(status))?.rank ?? OTHER_STATUS_RANK
 }
 
-function inlinePolicyNames(component: FlaggedComponent): string {
-  return inline(component.policyComponents.map((policy) => `${policy.policyName} (${policy.status})`).join(', '))
+// The date a hit is due by: its due date, else when it becomes outdated, else when it became
+// impending. Only ISO dates take part in sorting.
+function hitDate(hit: PolicyHit): string | undefined {
+  const date = hit.dueDate ?? hit.outdatedDate ?? hit.impendingDate
+  return date !== undefined && ISO_DATE.test(date) ? date.slice(0, 10) : undefined
 }
 
-function inline(value: string): string {
-  return value.replace(/[\r\n]+/g, ' ').replace(/`/g, "'")
+function isoDueDate(hit: PolicyHit): string | undefined {
+  return hit.dueDate !== undefined && ISO_DATE.test(hit.dueDate) ? hit.dueDate.slice(0, 10) : undefined
 }
 
-function markdownCode(value: string): string {
-  const singleLine = value.replace(/[\r\n]+/g, ' ')
+function earliestDate(dates: Array<string | undefined>): string | undefined {
+  let earliest: string | undefined
+  for (const date of dates) if (date !== undefined && (earliest === undefined || date < earliest)) earliest = date
+  return earliest
+}
+
+// Plain code-unit comparison, never localeCompare: the order must not depend on the runtime's ICU.
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+function compareHits(a: PolicyHit, b: PolicyHit): number {
+  return (
+    statusRank(a.status) - statusRank(b.status) ||
+    compareText(hitDate(a) ?? NO_DATE, hitDate(b) ?? NO_DATE) ||
+    compareText(a.policyName, b.policyName) ||
+    compareText(a.name ?? '', b.name ?? '')
+  )
+}
+
+function compareResources(a: ResourceEntry, b: ResourceEntry): number {
+  return a.rank - b.rank || compareText(a.sortDate, b.sortDate) || compareText(a.component.address, b.component.address)
+}
+
+// Characters a block adds to the summary: each line and its newline, plus the blank separator line.
+function blockSize(lines: string[]): number {
+  return lines.length === 0 ? 0 : lines.reduce((total, line) => total + line.length + 1, 1)
+}
+
+// encodeURIComponent leaves ! ' ( ) * alone; ( and ) would end a Markdown link destination.
+function encodeSegment(segment: string): string {
+  return encodeURIComponent(segment).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
+// A link is built only when every path segment, decoded, is a real name: an empty, `.` or `..` segment
+// (even percent-encoded) would let the URL leave the repository's blob tree.
+function linkablePath(path: string): boolean {
+  return path.split('/').every((segment) => {
+    let decoded: string
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      return false
+    }
+    return decoded !== '' && decoded !== '.' && decoded !== '..'
+  })
+}
+
+function sourceUrl(repository: ReportRepository, location: SourceLocation): string {
+  const path = location.path.split('/').map(encodeSegment).join('/')
+  return `${GITHUB_WEB_URL}/${encodeSegment(repository.owner)}/${encodeSegment(repository.repo)}/blob/${encodeSegment(repository.headSha)}/${path}#L${location.startLine}`
+}
+
+// Every value that originates from the plan, fetcher or analyzer is capped and kept on one line.
+function plainValue(value: string): string {
+  const capped = value.length > MAX_VALUE_CHARS ? `${value.slice(0, MAX_VALUE_CHARS - 1)}…` : value
+  return capped.replace(/[\r\n]+/g, ' ')
+}
+
+// Every value that originates from the plan, fetcher or analyzer is rendered as a code span:
+// inside backticks, @mentions, links, images, HTML and #refs are literal. Capped so one
+// for_each key cannot fill the comment.
+export function markdownCode(value: string): string {
+  const singleLine = plainValue(value)
+  // Two bare backticks are not an empty span: they would pair with the next value's opening fence.
+  if (singleLine.length === 0) return '` `'
   const longestRun = Math.max(0, ...Array.from(singleLine.matchAll(/`+/g), (match) => match[0].length))
   const delimiter = '`'.repeat(longestRun + 1)
   const padding = singleLine.startsWith('`') || singleLine.endsWith('`') ? ' ' : ''
   return `${delimiter}${padding}${singleLine}${padding}${delimiter}`
 }
 
+// A code span inside a table cell. GFM splits cells on | even inside backticks, which would leave
+// the span open and render the rest as Markdown; \| keeps the pipe in the cell and shows as |.
+export function tableCode(value: string): string {
+  return markdownCode(value).replace(/\|/g, '\\|')
+}
+
+// A line built from whole code spans: it stops before the span that would pass the line limit and
+// says how many were left out, so no cut can leave a code span open.
+function joinWithinLine(prefix: string, spans: string[], suffix = ''): string {
+  const moreRoom = ` +${spans.length} more`.length
+  let line = prefix
+  for (const [index, span] of spans.entries()) {
+    const candidate = index === 0 ? `${line}${span}` : `${line}, ${span}`
+    const isLast = index === spans.length - 1
+    if (candidate.length + suffix.length + (isLast ? 0 : moreRoom) > MAX_SUMMARY_LINE_LENGTH) {
+      return `${line} +${spans.length - index} more${suffix}`
+    }
+    line = candidate
+  }
+  return `${line}${suffix}`
+}
+
 function truncate(value: string, maximum: number): string {
   return value.length <= maximum ? value : `${value.slice(0, maximum - 14)}\n… truncated`
 }
 
-function appendLimited<T>(lines: string[], items: T[], format: (item: T) => string, label: string): void {
-  for (const item of items.slice(0, MAX_SECTION_ITEMS)) lines.push(truncate(format(item), MAX_SUMMARY_LINE_LENGTH))
-  const omitted = items.length - MAX_SECTION_ITEMS
-  if (omitted > 0) lines.push(`- … ${omitted} additional ${label} omitted from this summary.`)
+// An annotation message is capped at 60,000 UTF-8 bytes, never in the middle of a character.
+function truncateBytes(value: string, maximumBytes: number): string {
+  if (Buffer.byteLength(value) <= maximumBytes) return value
+  const marker = '\n… truncated'
+  const kept = Buffer.from(value)
+    .subarray(0, maximumBytes - Buffer.byteLength(marker))
+    .toString('utf8')
+    .replace(/�+$/, '')
+  return `${kept}${marker}`
 }
 
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return count === 1 ? singular : pluralForm
 }

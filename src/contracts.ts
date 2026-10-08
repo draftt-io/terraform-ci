@@ -1,8 +1,11 @@
 import { isRecord, requireBoolean, requireNumber, requireString } from './objects.ts'
 
 export interface PolicyHit {
+  policyId?: string
   policyName: string
+  name?: string
   status: string
+  currentVersion?: string
   desiredVersion?: string
   recommendedVersion?: string
   hasForceUpgrade?: boolean
@@ -29,10 +32,11 @@ export interface ScanResponse {
   }
   components: FlaggedComponent[]
   evaluation: {
+    evaluatedPolicies?: Array<{ policyId: string; name: string }>
     unevaluatedPolicies: Array<{ policyId: string; name?: string; reason: string }>
     componentsWithGaps: Array<{
       address: string
-      policyGaps: Array<{ policyName: string; reason: string }>
+      policyGaps: Array<{ policyName: string; reason: string; missingAttributes?: string[] }>
     }>
   }
   coverage: {
@@ -62,6 +66,7 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
     },
     components,
     evaluation: {
+      ...optionalEvaluatedPolicies(evaluation.evaluatedPolicies),
       unevaluatedPolicies: array(evaluation.unevaluatedPolicies, 'evaluation.unevaluatedPolicies').map((item, index) => {
         const policy = record(item, `evaluation.unevaluatedPolicies.${index}`)
         return {
@@ -79,6 +84,9 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
             return {
               policyName: requireString(gap.policyName, 'policyName'),
               reason: requireString(gap.reason, 'reason'),
+              ...(Array.isArray(gap.missingAttributes)
+                ? { missingAttributes: gap.missingAttributes.filter((name): name is string => typeof name === 'string') }
+                : {}),
             }
           }),
         }
@@ -136,8 +144,11 @@ function parseFlaggedComponent(value: unknown, index: number): FlaggedComponent 
     policyComponents: array(component.policyComponents, 'policyComponents').map((item) => {
       const policy = record(item, 'policyComponent')
       return {
+        ...(typeof policy.policyId === 'string' ? { policyId: policy.policyId } : {}),
         policyName: requireString(policy.policyName, 'policyName'),
+        ...(typeof policy.name === 'string' ? { name: policy.name } : {}),
         status: requireString(policy.status, 'status'),
+        ...(typeof policy.currentVersion === 'string' ? { currentVersion: policy.currentVersion } : {}),
         ...(typeof policy.desiredVersion === 'string' ? { desiredVersion: policy.desiredVersion } : {}),
         ...(typeof policy.recommendedVersion === 'string' ? { recommendedVersion: policy.recommendedVersion } : {}),
         ...(typeof policy.hasForceUpgrade === 'boolean' ? { hasForceUpgrade: policy.hasForceUpgrade } : {}),
@@ -147,6 +158,16 @@ function parseFlaggedComponent(value: unknown, index: number): FlaggedComponent 
       }
     }),
   }
+}
+
+// Read when present and dropped entry by entry when malformed: a response without the field
+// (an older server) still parses, and the report falls back to "N components checked".
+function optionalEvaluatedPolicies(value: unknown): { evaluatedPolicies?: Array<{ policyId: string; name: string }> } {
+  if (!Array.isArray(value)) return {}
+  const evaluatedPolicies = value.flatMap((item) =>
+    isRecord(item) && typeof item.policyId === 'string' && typeof item.name === 'string' ? [{ policyId: item.policyId, name: item.name }] : [],
+  )
+  return { evaluatedPolicies }
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
