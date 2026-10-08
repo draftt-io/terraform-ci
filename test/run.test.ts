@@ -7,6 +7,7 @@ import { completedConclusion, scanErrorConclusion } from '../src/outcome.ts'
 import type { SanitizedPlan } from '../src/plan.ts'
 import type { ScanReport } from '../src/report.ts'
 import { run, type ActionDependencies, type ActionRuntime, type CheckPublisherLike } from '../src/run.ts'
+import type { WorkspaceSourceStatus } from '../src/workspace.ts'
 import { scanResponse } from './fixtures.ts'
 
 class FakeRuntime implements ActionRuntime {
@@ -81,7 +82,7 @@ interface HarnessOptions {
   failOnScanError?: boolean
   report?: ScanReport
   planError?: Error
-  workspaceStatus?: 'matched' | 'head_mismatch' | 'dirty_terraform' | 'git_unavailable'
+  workspaceStatus?: WorkspaceSourceStatus
 }
 
 function createHarness(options: HarnessOptions = {}): {
@@ -226,6 +227,7 @@ test('explains why source annotations are suppressed', async () => {
     ['head_mismatch', 'pull request head commit is not checked out'],
     ['dirty_terraform', 'Terraform source files differ from the checked-out commit'],
     ['git_unavailable', 'Git repository state could not be inspected'],
+    ['nested_workspace', 'GITHUB_WORKSPACE is not the repository root'],
   ] as const
 
   for (const [workspaceStatus, message] of cases) {

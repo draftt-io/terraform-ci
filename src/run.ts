@@ -131,6 +131,8 @@ function sourceMappingWarning(status: Exclude<WorkspaceSourceStatus, 'matched'>)
   switch (status) {
     case 'head_mismatch':
       return 'The pull request head commit is not checked out. Configure actions/checkout with ref: ${{ github.event.pull_request.head.sha }}; findings will remain in the Check summary.'
+    case 'nested_workspace':
+      return 'GITHUB_WORKSPACE is not the repository root; findings will remain in the Check summary.'
     case 'dirty_terraform':
       return 'Terraform source files differ from the checked-out commit; findings will remain in the Check summary.'
     case 'git_unavailable':
