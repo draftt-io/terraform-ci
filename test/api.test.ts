@@ -124,3 +124,29 @@ test('a plain 403 is still an authentication failure', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('401 and 413 on /v1/scans are not retried and fail with their fixed messages', async () => {
+  const cases = [
+    { status: 401, message: 'Draftt authentication failed' },
+    { status: 413, message: 'Draftt rejected the scan request as too large' },
+  ]
+  const originalFetch = globalThis.fetch
+  try {
+    for (const item of cases) {
+      let calls = 0
+      const sleeps: number[] = []
+      globalThis.fetch = async () => {
+        calls += 1
+        return new Response(JSON.stringify({ code: 'backend_code', message: 'backend body text' }), { status: item.status, headers: { 'content-type': 'application/json' } })
+      }
+      await assert.rejects(
+        () => scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
+        (error: unknown) => error instanceof ScanRequestFailure && error.status === item.status && error.message === item.message && error.code === undefined,
+      )
+      assert.equal(calls, 1, `HTTP ${item.status} must not be retried`)
+      assert.deepEqual(sleeps, [], `HTTP ${item.status} must not wait for a retry`)
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

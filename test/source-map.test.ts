@@ -33,10 +33,20 @@ test('keys are exact plan addresses of retained managed resources being created,
   })
 })
 
-test('a derived component (EBS from aws_instance) resolves through the parent address the server reads as sourceAddress', async () => {
-  const { sourceMap } = await buildSourceMap({ format_version: '1.2', resource_changes: [{ address: 'aws_instance.web', mode: 'managed', change: { actions: ['create'] } }] }, locator)
-  assert.deepEqual(sourceMap['aws_instance.web'], { path: 'ec2.tf', startLine: 10 })
-  assert.equal(sourceMap['aws_instance.web/ebs'], undefined)
+test('a derived component (EBS from aws_instance) gets no key of its own: only the parent plan address is looked up and mapped', async () => {
+  // The server resolves a derived component through sourceAddress (the parent address); the map
+  // must hold exactly the plan's own addresses, with no derived or normalised keys added.
+  const asked: string[] = []
+  const spy: SourceLocator = {
+    async locate(reference) {
+      asked.push(reference.address)
+      return locator.locate(reference)
+    },
+  }
+  const { sourceMap, capped } = await buildSourceMap({ format_version: '1.2', resource_changes: [{ address: 'aws_instance.web', mode: 'managed', change: { actions: ['create'] } }] }, spy)
+  assert.equal(capped, false)
+  assert.deepEqual(asked, ['aws_instance.web'])
+  assert.deepEqual(sourceMap, { 'aws_instance.web': { path: 'ec2.tf', startLine: 10 } })
 })
 
 test('stops at the entry limit and reports the cap', async () => {

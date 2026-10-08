@@ -358,11 +358,68 @@ test('server mode with neither checkRunUrl nor publishError also publishes the f
   assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'action' })
 })
 
+const NOTHING_PUBLISHED_WARNING = 'No check was published: Draftt CI reported neither a published check nor a publish error, and no github-token is available for a fallback check.'
+
 test('server mode without a token and without checkRunUrl reports publisher none', async () => {
   const h = createHarness({ githubToken: null, payload: PR })
   await run(h.dependencies)
   assert.deepEqual(h.publisher.names, [])
   assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'none', 'check-run-url': '', 'annotation-count': 0 })
+  assert.deepEqual(h.runtime.warnings, [NOTHING_PUBLISHED_WARNING])
+  assert.deepEqual(h.runtime.failures, [])
+})
+
+test('server mode without a token warns only about the publishError when the server reported one', async () => {
+  const h = createHarness({ githubToken: null, response: { publishError: { code: 'not_bound', message: 'no binding' } }, payload: PR })
+  await run(h.dependencies)
+  assert.deepEqual(h.runtime.warnings, ['Draftt CI could not publish the check (not_bound): no binding'])
+  assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'none', 'check-run-url': '' })
+})
+
+test('server mode masks the Draftt key and the github token before any read, log or output', async () => {
+  const h = createHarness({ response: { publishError: { code: 'not_bound', message: 'no binding' } }, sourceMapCapped: true, payload: PR })
+  const order: string[] = []
+  const runtime = h.runtime
+  const record = <K extends 'setSecret' | 'setOutput' | 'warning' | 'info' | 'setFailed'>(name: K): void => {
+    const original = runtime[name].bind(runtime) as (...args: unknown[]) => void
+    ;(runtime as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+      order.push(name === 'setSecret' ? `setSecret:${String(args[0])}` : name === 'setOutput' ? `setOutput:${String(args[0])}=${String(args[1])}` : name)
+      original(...args)
+    }
+  }
+  for (const name of ['setSecret', 'setOutput', 'warning', 'info', 'setFailed'] as const) record(name)
+  const writeSummary = runtime.writeSummary.bind(runtime)
+  runtime.writeSummary = async (markdown) => {
+    order.push('writeSummary')
+    await writeSummary(markdown)
+  }
+  const readInputs = h.dependencies.readInputs
+  h.dependencies.readInputs = (r) => {
+    order.push('readInputs')
+    return readInputs(r)
+  }
+  const readPlan = h.dependencies.readAndSanitizePlan
+  h.dependencies.readAndSanitizePlan = async (...args) => {
+    order.push('readPlan')
+    return readPlan(...args)
+  }
+  await run(h.dependencies)
+  assert.deepEqual(runtime.secrets, ['draftt-key', 'github-token'])
+  const firstSecret = order.indexOf('setSecret:draftt-key')
+  // Only run()'s constant placeholder outputs precede masking; they carry no input-derived value.
+  assert.deepEqual(order.slice(0, firstSecret), [
+    'setOutput:scan-status=error',
+    'setOutput:violation-count=0',
+    'setOutput:warning-count=0',
+    'setOutput:annotation-count=0',
+    'setOutput:check-run-url=',
+    'setOutput:publisher=none',
+  ])
+  assert.deepEqual(order.slice(firstSecret, firstSecret + 2), ['setSecret:draftt-key', 'setSecret:github-token'])
+  assert.equal(order.filter((entry) => entry.startsWith('setSecret')).length, 2)
+  // The run did read, log and output after masking, so the ordering above is meaningful.
+  const after = order.slice(firstSecret + 2)
+  for (const entry of ['readInputs', 'readPlan', 'warning', 'writeSummary', 'setOutput:publisher=action']) assert.ok(after.includes(entry), entry)
 })
 
 test('a fallback publish failure is a warning, not a scan error', async () => {

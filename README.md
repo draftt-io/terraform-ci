@@ -75,7 +75,7 @@ Then the Draftt CI App owns the check and the PR comment, and the Action creates
 - Current limitation: when a pull request is opened, reopened or pushed, the App's webhook queues a check and a waiting comment for the root key `.` only. If no upload arrives for that key, the check concludes neutral after 10 minutes. A workflow whose `terraform-root` is not the repository root therefore also sees an extra `Draftt Terraform Policy Scan` check that ends neutral with "Root module plan not received", plus its comment.
 - On `pull_request_target` the planned code runs with access to the Draftt key; prefer `pull_request`.
 
-Every other case — `publish-mode: action`, the default ui-backend `api-url`, and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated. Only its report layout (below) and the new outputs change.
+Every other case — `publish-mode: action`, the default ui-backend `api-url`, and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated. Only its report layout (below), the new outputs, the `github-token` default (`${{ github.token }}`) and the nested-workspace annotation check change: when `GITHUB_WORKSPACE` is not the repository root, annotations are skipped with a warning.
 
 Requests to `/v1/scans` over 1 MiB are gzip-compressed. A `429` response waits for `Retry-After` (at most 60 s) before retrying.
 
@@ -87,7 +87,7 @@ Annotations on the changed lines are plain text and at most 500, most urgent fir
 
 ## Upgrading from v0.1.x
 
-With the default `api-url` only the report layout and the new outputs change. Once `api-url` points at `/v1/scans`, a required check pinned to the GitHub Actions source must be re-pinned to the Draftt CI App check, under the name given in Publish mode. Any pull request that gets no server-mode upload while the App is installed (`action` mode, the default `api-url`, pull requests the workflow skips by path or draft) shows the App's queued check concluding neutral after 10 minutes.
+With the default `api-url` only the report layout, the new outputs, the `github-token` default (`${{ github.token }}`, so a workflow that omitted it now gets a check) and the nested-workspace annotation check (annotations are skipped with a warning when `GITHUB_WORKSPACE` is not the repository root) change. Once `api-url` points at `/v1/scans`, a required check pinned to the GitHub Actions source must be re-pinned to the Draftt CI App check, under the name given in Publish mode. Any pull request that gets no server-mode upload while the App is installed (`action` mode, the default `api-url`, pull requests the workflow skips by path or draft) shows the App's queued check concluding neutral after 10 minutes.
 
 ## Enforcement
 

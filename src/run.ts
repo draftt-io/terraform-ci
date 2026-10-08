@@ -240,6 +240,8 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
         } catch {
           runtime.warning('The Draftt fallback check could not be published.')
         }
+      } else if (!response.publishError) {
+        runtime.warning('No check was published: Draftt CI reported neither a published check nor a publish error, and no github-token is available for a fallback check.')
       }
     }
 
