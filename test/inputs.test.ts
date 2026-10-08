@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parsePolicyIds, readInputs } from '../src/inputs.ts'
+import { parsePolicyIds, readInputs, scanKeyFromTerraformRoot } from '../src/inputs.ts'
 
 test('parses omitted, selected, and explicitly empty policy ids', () => {
   assert.equal(parsePolicyIds(''), undefined)
@@ -33,4 +33,25 @@ test('reads the public Action interface', () => {
   assert.deepEqual(inputs.policyIds, [])
   assert.equal(inputs.failOnViolations, false)
   assert.equal(inputs.failOnScanError, true)
+})
+
+function reader(values: Record<string, string>): { getInput(name: string): string } {
+  return { getInput: (name: string) => values[name] ?? '' }
+}
+
+test('publish-mode defaults to server, accepts action, rejects others; github-token is optional', () => {
+  const base = { 'plan-json': 'p', 'api-url': 'https://x/v1/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-violations': 'false', 'fail-on-scan-error': 'false' }
+  assert.equal(readInputs(reader(base)).publishMode, 'server')
+  assert.equal(readInputs(reader(base)).githubToken, undefined)
+  assert.equal(readInputs(reader({ ...base, 'publish-mode': 'action', 'github-token': 't' })).publishMode, 'action')
+  assert.throws(() => readInputs(reader({ ...base, 'publish-mode': 'both' })), /publish-mode must be "server" or "action"/)
+})
+
+test('scanKeyFromTerraformRoot normalises and validates', () => {
+  assert.equal(scanKeyFromTerraformRoot('.'), '.')
+  assert.equal(scanKeyFromTerraformRoot('./'), '.')
+  assert.equal(scanKeyFromTerraformRoot('./modules/eks/'), 'modules/eks')
+  assert.equal(scanKeyFromTerraformRoot('modules/eks'), 'modules/eks')
+  assert.throws(() => scanKeyFromTerraformRoot('../other'), /terraform-root/)
+  assert.throws(() => scanKeyFromTerraformRoot('bad key'), /terraform-root/)
 })

@@ -40,9 +40,12 @@ export interface ScanResponse {
     mergedResources: unknown[]
     skippedResources: unknown[]
   }
+  checkRunUrl?: string
+  annotationCount?: number
+  publishError?: { code: string; message: string }
 }
 
-export function parseScanResponse(value: unknown): ScanResponse {
+export function parseScanResponse(value: unknown, options: { serverUrl?: string } = {}): ScanResponse {
   if (!isRecord(value)) invalid('root')
   const summary = record(value.summary, 'summary')
   const evaluation = record(value.evaluation, 'evaluation')
@@ -51,7 +54,7 @@ export function parseScanResponse(value: unknown): ScanResponse {
   const hasPolicyViolations = requireBoolean(summary.hasPolicyViolations, 'summary.hasPolicyViolations')
   if (hasPolicyViolations !== (components.length > 0)) invalid('summary.hasPolicyViolations')
 
-  return {
+  const parsed: ScanResponse = {
     summary: {
       managedResourcesInPlan: nonNegativeInteger(summary.managedResourcesInPlan, 'summary.managedResourcesInPlan'),
       componentsMapped: nonNegativeInteger(summary.componentsMapped, 'summary.componentsMapped'),
@@ -92,6 +95,32 @@ export function parseScanResponse(value: unknown): ScanResponse {
       mergedResources: array(coverage.mergedResources, 'coverage.mergedResources'),
       skippedResources: array(coverage.skippedResources, 'coverage.skippedResources'),
     },
+  }
+
+  const serverHost = safeHost(options.serverUrl ?? process.env.GITHUB_SERVER_URL ?? 'https://github.com')
+  const checkRunUrl = typeof value.checkRunUrl === 'string' && isTrustedCheckRunUrl(value.checkRunUrl, serverHost) ? value.checkRunUrl : undefined
+  const annotationCount = Number.isSafeInteger(value.annotationCount) && (value.annotationCount as number) >= 0 ? (value.annotationCount as number) : undefined
+  // The server sends publishError: null when publishing succeeded; only a well-formed object is an error.
+  const publishError = isRecord(value.publishError) && typeof value.publishError.code === 'string' && typeof value.publishError.message === 'string'
+    ? { code: value.publishError.code, message: value.publishError.message }
+    : undefined
+  return { ...parsed, ...(checkRunUrl ? { checkRunUrl } : {}), ...(annotationCount === undefined ? {} : { annotationCount }), ...(publishError ? { publishError } : {}) }
+}
+
+function safeHost(url: string): string | undefined {
+  try {
+    return new URL(url).host
+  } catch {
+    return undefined
+  }
+}
+
+function isTrustedCheckRunUrl(value: string, serverHost: string | undefined): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && (url.host === 'github.com' || url.host === serverHost)
+  } catch {
+    return false
   }
 }
 

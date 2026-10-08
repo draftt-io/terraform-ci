@@ -249,7 +249,7 @@ test('rejects an unmarked recognized credential left in a retained field', () =>
 })
 
 test('serializes explicit empty policy selection', () => {
-  const body = JSON.parse(serializeScanRequest(sanitizePlan(basePlan()), [])) as Record<string, unknown>
+  const body = JSON.parse(serializeScanRequest(sanitizePlan(basePlan()), []).body) as Record<string, unknown>
   assert.deepEqual(body.policyIds, [])
 })
 
@@ -308,4 +308,18 @@ test('rejects malformed actions and mirrors before serialization', () => {
     () => sanitizePlan(invalidMirrorPlan),
     (error: unknown) => error instanceof Error && error.message.includes('invalid value mirror') && !error.message.includes('unrecognized-plain-secret'),
   )
+})
+
+test('serializeScanRequest drops the source map first when the body would exceed the limit', () => {
+  // A plan just under the limit: the plan alone fits, the plan plus a 1,000-entry map does not.
+  const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
+  const sourceMap = Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => [`r.${i}`, { path: 'x'.repeat(100), startLine: 1 }]))
+  const github = { repositoryId: 1, repositoryOwnerId: 2, pullRequestNumber: 3, headSha: 'a'.repeat(40), scanKey: '.', runId: 1, runAttempt: 1, failOnViolations: false, sourceMap }
+  const { body, sourceMapDropped } = serializeScanRequest(plan, undefined, github)
+  assert.equal(sourceMapDropped, true)
+  assert.equal(JSON.parse(body).github.sourceMap, undefined)
+  assert.equal(JSON.parse(body).github.scanKey, '.')
+  const small = serializeScanRequest({ format_version: '1.2', resource_changes: [] }, ['1'], { ...github, sourceMap: { 'a.b': { path: 'a.tf', startLine: 1 } } })
+  assert.equal(small.sourceMapDropped, false)
+  assert.deepEqual(Object.keys(JSON.parse(small.body)), ['plan', 'policyIds', 'github'])
 })

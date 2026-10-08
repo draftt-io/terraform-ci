@@ -57,3 +57,25 @@ test('rejects malformed nested response data', () => {
   assert.equal(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.reason, 'missing_data')
   assert.throws(() => parseScanResponse({ ...response, coverage: null }), /coverage/)
 })
+
+test('parses the v2 publish fields and keeps a github.com check run url', () => {
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 3, publishError: { code: 'comment', message: 'm' } })
+  assert.equal(parsed.checkRunUrl, 'https://github.com/o/r/runs/1')
+  assert.equal(parsed.annotationCount, 3)
+  assert.deepEqual(parsed.publishError, { code: 'comment', message: 'm' })
+})
+
+test('drops a check run url that is not https on github.com or the server host, and still accepts a v0.1.1 body', () => {
+  assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'http://github.com/x' }).checkRunUrl, undefined)
+  assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://evil.test/x' }).checkRunUrl, undefined)
+  assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://ghe.corp/x' }, { serverUrl: 'https://ghe.corp' }).checkRunUrl, 'https://ghe.corp/x')
+  assert.equal(parseScanResponse({ ...scanResponse(), annotationCount: -1, publishError: { code: 1 } }).annotationCount, undefined)
+  assert.equal(parseScanResponse(scanResponse()).publishError, undefined)
+})
+
+test('treats a null publishError from the server as no publish error', () => {
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 0, publishError: null })
+  assert.equal(parsed.publishError, undefined)
+  assert.equal('publishError' in parsed, false)
+  assert.equal(parsed.annotationCount, 0)
+})

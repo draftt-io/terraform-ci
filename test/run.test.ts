@@ -107,6 +107,7 @@ function createHarness(options: HarnessOptions = {}): {
     terraformRoot: '.',
     failOnViolations,
     failOnScanError,
+    publishMode: 'action',
   }
   const plan: SanitizedPlan = { format_version: '1.2', resource_changes: [] }
   const response: ScanResponse = scanResponse()
@@ -143,7 +144,7 @@ function createHarness(options: HarnessOptions = {}): {
         if (options.planError) throw options.planError
         return plan
       },
-      serializeScanRequest: () => '{"plan":{}}',
+      serializeScanRequest: () => ({ body: '{"plan":{}}', sourceMapDropped: false }),
       inspectWorkspaceForSourceMapping: async () => options.workspaceStatus ?? 'matched',
       createSourceLocator: async () => ({
         locate: async () => ({ kind: 'unresolved', reason: 'missing_declaration' }),

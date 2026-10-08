@@ -1,6 +1,7 @@
 import { realpath, stat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { isRecord } from './objects.ts'
+import type { GitHubScanContext } from './request.ts'
 
 export const MAX_PLAN_BYTES = 50 * 1024 * 1024
 
@@ -208,11 +209,23 @@ function validateExpectedSensitiveFields(value: unknown, path: string, fieldName
   }
 }
 
-export function serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined): string {
-  const request = policyIds === undefined ? { plan } : { plan, policyIds }
-  const body = JSON.stringify(request)
+export function serializeScanRequest(
+  plan: SanitizedPlan,
+  policyIds: string[] | undefined,
+  github?: GitHubScanContext,
+): { body: string; sourceMapDropped: boolean } {
+  const serialize = (context: GitHubScanContext | undefined): string =>
+    JSON.stringify({ plan, ...(policyIds === undefined ? {} : { policyIds }), ...(context ? { github: context } : {}) })
+  let body = serialize(github)
+  let sourceMapDropped = false
+  // The source map is optional enrichment: drop it before giving up on an oversized request.
+  if (Buffer.byteLength(body) > MAX_PLAN_BYTES && github?.sourceMap) {
+    const { sourceMap: _dropped, ...withoutMap } = github
+    body = serialize(withoutMap)
+    sourceMapDropped = true
+  }
   if (Buffer.byteLength(body) > MAX_PLAN_BYTES) throw new Error('Scrubbed scan request exceeds the 50 MiB request limit')
-  return body
+  return { body, sourceMapDropped }
 }
 
 function projectResourceChange(resource: Record<string, unknown>): RetainedResource {

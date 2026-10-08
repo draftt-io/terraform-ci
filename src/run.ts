@@ -3,6 +3,7 @@ import type { CheckAnnotation, CheckConclusion } from './github-check.ts'
 import type { ActionInputs, InputReader } from './inputs.ts'
 import type { SanitizedPlan } from './plan.ts'
 import type { ScanReport, SourceLocator } from './report.ts'
+import type { GitHubScanContext } from './request.ts'
 import type { WorkspaceSourceStatus } from './workspace.ts'
 
 type ScanStatus = 'completed' | 'skipped' | 'error'
@@ -30,7 +31,7 @@ export interface ActionDependencies {
   createPublisher(token: string, headSha?: string): CheckPublisherLike
   readInputs(runtime: InputReader): ActionInputs
   readAndSanitizePlan(planPath: string, workspaceRoot: string): Promise<SanitizedPlan>
-  serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined): string
+  serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined, github?: GitHubScanContext): { body: string; sourceMapDropped: boolean }
   inspectWorkspaceForSourceMapping(workspaceRoot: string, expectedSha: string): Promise<WorkspaceSourceStatus>
   createSourceLocator(workspaceRoot: string, terraformRoot: string): Promise<SourceLocator>
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
@@ -73,7 +74,7 @@ export async function run(dependencies: ActionDependencies): Promise<void> {
 
     const workspaceRoot = dependencies.workspaceRoot()
     const plan = await dependencies.readAndSanitizePlan(inputs.planJson, workspaceRoot)
-    const body = dependencies.serializeScanRequest(plan, inputs.policyIds)
+    const { body } = dependencies.serializeScanRequest(plan, inputs.policyIds)
 
     let locator: SourceLocator | undefined
     const workspaceStatus = await dependencies.inspectWorkspaceForSourceMapping(workspaceRoot, headSha)
