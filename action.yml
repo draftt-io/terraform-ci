@@ -13,7 +13,7 @@ inputs:
     description: Draftt access key
     required: false
   github-token:
-    description: GitHub token used for the fallback and error checks (checks:write)
+    description: "GitHub token for this Action's checks (checks:write). With the default api-url or publish-mode action (the v0.1.1 flow) it publishes the main check and is required; in server mode it is used only for the fallback (Action) check and the error check. In either mode it also publishes the skipped check for pull requests from external forks."
     required: false
     default: ${{ github.token }}
   terraform-root:
@@ -32,7 +32,7 @@ inputs:
     required: false
     default: "false"
   publish-mode:
-    description: "server: on pull_request events against a /v1/scans api-url, the Draftt CI GitHub App publishes the check and PR comment; every other case, and action, keeps the v0.1.1 check"
+    description: "server: on pull_request events against a /v1/scans api-url, the Draftt CI GitHub App publishes the check and PR comment; every other case, and action, keeps the v0.1.1 check; when the App does not publish, the Action posts a fallback (Action) check"
     required: false
     default: server
 

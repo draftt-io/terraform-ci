@@ -54,7 +54,7 @@ jobs:
 
 Use `tofu plan` and `tofu show -json` instead when the repository uses OpenTofu.
 
-`github-token` defaults to `${{ github.token }}`; pass it only to use a different token. Keep `checks: write`: the v0.1.1 flow uses it for its check, and server mode uses it for the fallback and error checks.
+`github-token` defaults to `${{ github.token }}`; pass it only to use a different token. Keep `checks: write`: the v0.1.1 flow uses it for its check, server mode uses it for the fallback and error checks, and either mode uses it for the skipped check on pull requests from external forks.
 
 ## Publish mode
 
@@ -62,20 +62,20 @@ Use `tofu plan` and `tofu show -json` instead when the repository uses OpenTofu.
 
 1. `publish-mode` is `server`;
 2. `api-url` ends with `/v1/scans` (a trailing slash is fine). Until the default changes, set it to `https://draftt-ci.draftt.io/v1/scans`;
-3. the event is `pull_request` or `pull_request_target`.
+3. the event is a pull request event: `pull_request`, `pull_request_target`, or another event whose payload carries the pull request.
 
-Then the check `Draftt Terraform Policy Scan` and the PR comment are owned by the Draftt CI App, and the Action creates no check of its own while the scan runs:
+Then the Draftt CI App owns the check and the PR comment, and the Action creates no check of its own while the scan runs. The App's check is named `Draftt Terraform Policy Scan` for the scan key `.` and `Draftt Terraform Policy Scan (<scanKey>)` for any other key:
 
 - The Action sends the scrubbed plan, the pull request context and, when it can map resources to source, a map from resource address to file and line. The App completes its check and posts or updates one PR comment per scan key, marked `<!-- draftt-ci:scan:<scanKey> -->`.
-- The scan key is `terraform-root` as a workspace-relative POSIX path, with `.` for the repository root. An absolute `terraform-root` inside the workspace (for example `${{ github.workspace }}/infra`) is converted to its relative key; an absolute path outside the workspace is an error. Use one `terraform-root` per root module to get one check and one comment per module.
-- The service deduplicates uploads on `runId:runAttempt:scanKey`, so two scans in the same workflow run attempt need different `terraform-root` values. Re-running the workflow is a new attempt and scans again.
-- Annotations appear in **Files changed** on the exact changed lines only when the Action sends the source map. It sends none when the pull request head is not checked out, Terraform files differ from the commit, or `GITHUB_WORKSPACE` is not the repository root (nested workspaces); findings then stay in the check summary and the PR comment.
+- The scan key is `terraform-root` as a workspace-relative POSIX path, with `.` for the repository root. An absolute `terraform-root` inside the workspace (for example `${{ github.workspace }}/infra`) is converted to its relative key; an absolute path outside the workspace is an error. The key may contain only letters, digits, `.`, `_`, `/` and `-`, at most 200 characters, without `..` segments; anything else is a scan error in server mode. Use one `terraform-root` per root module to get one check and one comment per module.
+- The service deduplicates uploads on `runId:runAttempt:scanKey`. Two scans in one workflow run attempt, including matrix jobs (which share the run attempt), must use different directories: `infra`, `./infra/` and `${{ github.workspace }}/infra` are the same key. A second upload with the same key is never published: the Action then reports `publisher: server` with the first scan's `check-run-url`, while its counts and job summary are the second scan's. Scanning one root module more than once per run attempt (for example once per environment) is not supported in server mode. Re-running the workflow is a new attempt and scans again.
+- Annotations appear in **Files changed** on the exact changed lines only when the Action sends the source map. It sends none when, for example, the pull request head is not checked out, Terraform files differ from the commit, `GITHUB_WORKSPACE` is not the repository root (nested workspaces), Git cannot be inspected, the Terraform sources cannot be mapped, or the map was dropped to keep the request under 50 MiB; findings then stay in the check summary and the PR comment.
 - The source map is capped at 100,000 resources, with a warning; findings for the rest stay in the summary.
-- The Action posts a completed `Draftt Terraform Policy Scan (Action)` check only when the server did not publish (for example, the App is not installed on the repository) or the request failed. Failures to post that check are warnings.
-- When the App has started a queued check for a pull request and no upload arrives, the App concludes that check as neutral after 10 minutes.
+- The Action posts a completed `Draftt Terraform Policy Scan (Action)` check only when the server did not publish (for example, the App is not installed on the repository) or the scan could not complete (invalid inputs, an unreadable or rejected plan, a failed request). Failures to post that check are warnings.
+- Current limitation: when a pull request is opened, reopened or pushed, the App's webhook queues a check and a waiting comment for the root key `.` only. If no upload arrives for that key, the check concludes neutral after 10 minutes. A workflow whose `terraform-root` is not the repository root therefore also sees an extra `Draftt Terraform Policy Scan` check that ends neutral with "Root module plan not received", plus its comment.
 - On `pull_request_target` the planned code runs with access to the Draftt key; prefer `pull_request`.
 
-Every other case — `publish-mode: action`, the default ui-backend `api-url`, and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow unchanged, under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated.
+Every other case — `publish-mode: action`, the default ui-backend `api-url`, and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated. Only its report layout (below) and the new outputs change.
 
 Requests to `/v1/scans` over 1 MiB are gzip-compressed. A `429` response waits for `Retry-After` (at most 60 s) before retrying.
 
@@ -87,7 +87,7 @@ Annotations on the changed lines are plain text and at most 500, most urgent fir
 
 ## Upgrading from v0.1.x
 
-With the default `api-url` nothing changes. Once `api-url` points at `/v1/scans`, a required check pinned to the GitHub Actions source must be re-pinned to the Draftt CI App. `action` mode with the App installed leaves the App's queued check to time out as neutral after 10 minutes.
+With the default `api-url` only the report layout and the new outputs change. Once `api-url` points at `/v1/scans`, a required check pinned to the GitHub Actions source must be re-pinned to the Draftt CI App check, under the name given in Publish mode. Any pull request that gets no server-mode upload while the App is installed (`action` mode, the default `api-url`, pull requests the workflow skips by path or draft) shows the App's queued check concluding neutral after 10 minutes.
 
 ## Enforcement
 
@@ -119,7 +119,7 @@ Outputs contain counts, the check run URL and the publisher only. They never con
 
 The Action keeps only the plan sections Fetcher needs, removes Terraform-marked and recognized credential fields from both sides of an update, and rejects recognized credential formats that remain. If Terraform marks an unexpected field as sensitive, the Action sends nothing and reports a scan error rather than risk an incorrect policy result.
 
-The raw plan and final request are each limited to 50 MiB; the Action drops the source map first when the request would exceed it. The service caps the plan alone at 49 MiB, so a scrubbed plan between 49 and 50 MiB passes the Action and comes back as a scan error (`payload_too_large`, "Terraform plan exceeds the 49 MiB limit"). Keep plans under 49 MiB. The API key is masked before the plan is read.
+The raw plan and final request are each limited to 50 MiB; the Action drops the source map first when the request would exceed it. The service caps the plan alone at 49 MiB, so a scrubbed plan between 49 and 50 MiB passes the Action and comes back as a scan error ("Draftt rejected the scan request as too large"; the service caps the plan at 49 MiB). Keep plans under 49 MiB. The API key is masked before the plan is read.
 
 ## Development
 
