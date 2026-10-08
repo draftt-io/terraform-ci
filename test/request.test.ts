@@ -37,3 +37,22 @@ test('returns undefined on push, merge_group and workflow_dispatch payloads and 
   }
   assert.equal(buildGitHubContext({ payload: { pull_request: { number: 7 } }, env, headSha: SHA, failOnViolations: false, scanKey: '.' }), undefined)
 })
+
+test('rejects a zero pull request number or zero ids, and non-decimal env ids', () => {
+  const base = { env, headSha: SHA, failOnViolations: false, scanKey: '.' }
+  assert.equal(buildGitHubContext({ ...base, payload: { ...pullRequestPayload, pull_request: { number: 0 } } }), undefined)
+  assert.equal(buildGitHubContext({ ...base, payload: { pull_request: { number: 7 }, repository: { id: 0, owner: { id: 20 } } } }), undefined)
+  assert.equal(buildGitHubContext({ ...base, payload: { pull_request: { number: 7 }, repository: { id: 10, owner: { id: 0 } } } }), undefined)
+  assert.equal(buildGitHubContext({ ...base, env: { ...env, GITHUB_RUN_ID: '0' }, payload: pullRequestPayload }), undefined)
+  for (const runId of [' 42 ', '0x2a', '4.2e1', '42.0', '']) {
+    assert.equal(buildGitHubContext({ ...base, env: { ...env, GITHUB_RUN_ID: runId }, payload: pullRequestPayload }), undefined, runId)
+  }
+  assert.equal(buildGitHubContext({ ...base, env: { ...env, GITHUB_RUN_ATTEMPT: '0x2' }, payload: pullRequestPayload })?.runAttempt, 1)
+})
+
+test('omits workflowRunUrl unless it is https', () => {
+  const block = buildGitHubContext({ payload: pullRequestPayload, env: { ...env, GITHUB_SERVER_URL: 'http://ghe.local' }, headSha: SHA, failOnViolations: false, scanKey: '.' })
+  assert.ok(block)
+  assert.equal('workflowRunUrl' in block, false)
+  assert.equal(block.runId, 42)
+})

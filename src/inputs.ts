@@ -1,3 +1,5 @@
+import path from 'node:path'
+
 export type PublishMode = 'server' | 'action'
 
 export interface ActionInputs {
@@ -41,11 +43,24 @@ function parsePublishMode(value: string): PublishMode {
 const SCAN_KEY = /^[A-Za-z0-9._/-]{1,200}$/
 
 // terraform-root as the server's scan key: one check and one comment per root module.
-export function scanKeyFromTerraformRoot(terraformRoot: string): string {
-  const trimmed = terraformRoot.replace(/^\.\//, '').replace(/\/+$/, '')
-  const key = trimmed === '' || trimmed === '.' ? '.' : trimmed
-  if (!SCAN_KEY.test(key) || key.split('/').includes('..')) throw new Error('terraform-root must be a relative path without ".." segments')
+// Equivalent spellings map to one key ('./modules//eks/' -> 'modules/eks', './' -> '.'). An absolute
+// root (e.g. ${{ github.workspace }}, which v0.1.1 accepts) is made relative to `workspace`
+// (pass GITHUB_WORKSPACE); an absolute root outside it, or with no workspace given, is rejected.
+export function scanKeyFromTerraformRoot(terraformRoot: string, workspace?: string): string {
+  const relative = terraformRoot.startsWith('/') ? relativeToWorkspace(terraformRoot, workspace) : terraformRoot
+  const normalized = path.posix.normalize(relative === '' ? '.' : relative).replace(/\/+$/, '')
+  const key = normalized === '' ? '.' : normalized
+  if (!SCAN_KEY.test(key) || key.startsWith('/') || key.split('/').includes('..')) throw new Error(RELATIVE_ROOT_ERROR)
   return key
+}
+
+const RELATIVE_ROOT_ERROR = 'terraform-root must be a relative path without ".." segments'
+
+function relativeToWorkspace(absoluteRoot: string, workspace: string | undefined): string {
+  if (!workspace || !workspace.startsWith('/')) throw new Error(RELATIVE_ROOT_ERROR)
+  const relative = path.posix.relative(path.posix.normalize(workspace), path.posix.normalize(absoluteRoot))
+  if (relative === '..' || relative.startsWith('../') || relative.startsWith('/')) throw new Error(RELATIVE_ROOT_ERROR)
+  return relative === '' ? '.' : relative
 }
 
 export function parsePolicyIds(value: string): string[] | undefined {

@@ -55,3 +55,23 @@ test('scanKeyFromTerraformRoot normalises and validates', () => {
   assert.throws(() => scanKeyFromTerraformRoot('../other'), /terraform-root/)
   assert.throws(() => scanKeyFromTerraformRoot('bad key'), /terraform-root/)
 })
+
+test('scanKeyFromTerraformRoot canonicalises equivalent relative spellings', () => {
+  for (const root of ['modules//eks', 'modules/./eks', 'modules/eks/.', './modules/eks', 'modules/eks//', 'modules/x/../eks']) {
+    assert.equal(scanKeyFromTerraformRoot(root), 'modules/eks', root)
+  }
+  for (const root of ['./.', './/', '././', 'modules/..']) assert.equal(scanKeyFromTerraformRoot(root), '.', root)
+  for (const root of ['..', 'modules/../..', './../x']) assert.throws(() => scanKeyFromTerraformRoot(root), /terraform-root/, root)
+})
+
+test('scanKeyFromTerraformRoot relativises an absolute root inside the workspace and rejects one outside it', () => {
+  const workspace = '/home/runner/work/infra/infra'
+  assert.equal(scanKeyFromTerraformRoot(workspace, workspace), '.')
+  assert.equal(scanKeyFromTerraformRoot(`${workspace}/`, workspace), '.')
+  assert.equal(scanKeyFromTerraformRoot(`${workspace}/modules/eks/`, `${workspace}/`), 'modules/eks')
+  assert.equal(scanKeyFromTerraformRoot('modules/eks', workspace), 'modules/eks')
+  assert.throws(() => scanKeyFromTerraformRoot('/home/runner/work/infra/other', workspace), /terraform-root must be a relative path/)
+  assert.throws(() => scanKeyFromTerraformRoot('/etc', workspace), /terraform-root must be a relative path/)
+  assert.throws(() => scanKeyFromTerraformRoot(workspace), /terraform-root must be a relative path/)
+  assert.throws(() => scanKeyFromTerraformRoot('/'), /terraform-root must be a relative path/)
+})

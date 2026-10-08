@@ -37,7 +37,7 @@ export function buildGitHubContext(input: {
   const runId = positiveInteger(input.env.GITHUB_RUN_ID)
   if (repositoryId === undefined || repositoryOwnerId === undefined || runId === undefined) return undefined
   const runAttempt = positiveInteger(input.env.GITHUB_RUN_ATTEMPT) ?? 1
-  const workflowRunUrl = input.env.GITHUB_SERVER_URL && input.env.GITHUB_REPOSITORY ? `${input.env.GITHUB_SERVER_URL}/${input.env.GITHUB_REPOSITORY}/actions/runs/${runId}` : undefined
+  const workflowRunUrl = buildWorkflowRunUrl(input.env, runId)
   return {
     repositoryId,
     repositoryOwnerId,
@@ -52,7 +52,14 @@ export function buildGitHubContext(input: {
   }
 }
 
+// The server rejects a non-https workflowRunUrl with 400; it is optional, so omit it rather than fail the upload.
+function buildWorkflowRunUrl(env: NodeJS.ProcessEnv, runId: number): string | undefined {
+  if (!env.GITHUB_SERVER_URL || !env.GITHUB_REPOSITORY) return undefined
+  const url = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${runId}`
+  return url.startsWith('https://') ? url : undefined
+}
+
 function positiveInteger(value: unknown): number | undefined {
-  const number = typeof value === 'string' ? Number(value) : value
+  const number = typeof value === 'string' ? (/^\d+$/.test(value) ? Number(value) : undefined) : value
   return typeof number === 'number' && Number.isSafeInteger(number) && number > 0 ? number : undefined
 }
