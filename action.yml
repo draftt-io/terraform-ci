@@ -13,8 +13,9 @@ inputs:
     description: Draftt access key
     required: false
   github-token:
-    description: GitHub token used to publish the Check Run
-    required: true
+    description: GitHub token used for the fallback and error checks (checks:write)
+    required: false
+    default: ${{ github.token }}
   terraform-root:
     description: Root Terraform module directory
     required: false
@@ -30,6 +31,10 @@ inputs:
     description: Fail the Action when a reliable scan cannot complete
     required: false
     default: "false"
+  publish-mode:
+    description: "server: on pull_request events against a /v1/scans api-url, the Draftt CI GitHub App publishes the check and PR comment; every other case, and action, keeps the v0.1.1 check"
+    required: false
+    default: server
 
 outputs:
   scan-status:
@@ -39,7 +44,11 @@ outputs:
   warning-count:
     description: Number of incomplete evaluation or coverage warnings
   annotation-count:
-    description: Number of annotations published to the Check Run
+    description: Annotations published by the Draftt CI App or by this Action
+  check-run-url:
+    description: URL of the published check run, empty when none was published
+  publisher:
+    description: server, action, or none
 
 runs:
   using: node24
