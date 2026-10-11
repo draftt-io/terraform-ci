@@ -323,3 +323,48 @@ test('serializeScanRequest drops the source map first when the body would exceed
   assert.equal(small.sourceMapDropped, false)
   assert.deepEqual(Object.keys(JSON.parse(small.body)), ['plan', 'policyIds', 'github'])
 })
+
+test('strips assume_role_policy when marked sensitive', () => {
+  const trustPolicy = '{"Statement":[{"Action":"sts:AssumeRole","Principal":{"Service":"ec2.amazonaws.com"}}]}'
+  const plan = {
+    format_version: '1.2',
+    resource_changes: [{
+      address: 'aws_iam_role.app',
+      mode: 'managed',
+      type: 'aws_iam_role',
+      name: 'app',
+      change: {
+        actions: ['create'],
+        before: null,
+        after: { name: 'app', assume_role_policy: trustPolicy, max_session_duration: 3600 },
+        before_sensitive: false,
+        after_sensitive: { assume_role_policy: true },
+        after_unknown: { arn: true, assume_role_policy: false },
+      },
+    }],
+    configuration: {
+      root_module: {
+        resources: [{
+          address: 'aws_iam_role.app',
+          mode: 'managed',
+          type: 'aws_iam_role',
+          name: 'app',
+          expressions: {
+            name: { constant_value: 'app' },
+            assume_role_policy: { constant_value: trustPolicy },
+          },
+        }],
+      },
+    },
+  }
+
+  const sanitized = sanitizePlan(plan)
+  const serialized = JSON.stringify(sanitized)
+  assert.equal(serialized.includes('assume_role_policy'), false)
+  assert.equal(serialized.includes('sts:AssumeRole'), false)
+  const change = sanitized.resource_changes[0]?.change as Record<string, Record<string, unknown>>
+  assert.deepEqual(change.after, { name: 'app', max_session_duration: 3600 })
+  assert.deepEqual(change.after_unknown, { arn: true })
+  const configuration = sanitized.configuration as { root_module: { resources: Array<{ expressions: Record<string, unknown> }> } }
+  assert.deepEqual(configuration.root_module.resources[0]?.expressions, { name: { constant_value: 'app' } })
+})

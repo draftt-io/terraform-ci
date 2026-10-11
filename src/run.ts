@@ -114,6 +114,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
 
     const inputs = dependencies.readInputs(runtime)
     failOnScanError = inputs.failOnScanError
+    runtime.info(`Draftt scan: publish-mode action, endpoint ${endpointHost(inputs.apiUrl)}`)
 
     const workspaceRoot = dependencies.workspaceRoot()
     const plan = await dependencies.readAndSanitizePlan(inputs.planJson, workspaceRoot)
@@ -135,14 +136,16 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     const conclusion = dependencies.completedConclusion(report.violationCount, inputs.failOnViolations)
     await publisher.finish(conclusion, report.title, report.summary)
     await writeWorkflowSummary(runtime, report.summary)
-    setOutputs(runtime, {
+    const outputs: Outputs = {
       status: 'completed',
       violations: report.violationCount,
       warnings: report.warningCount,
       annotations: publisher.annotationCount,
       checkRunUrl: publisher.checkRunUrl ?? '',
       publisher: 'action',
-    })
+    }
+    setOutputs(runtime, outputs)
+    logCompletion(runtime, outputs)
 
     if (shouldFail) runtime.setFailed(`Draftt found policy violations in ${report.violationCount} Terraform resources.`)
   } catch (error) {
@@ -152,6 +155,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
       try {
         await publisher.finish(dependencies.scanErrorConclusion(failOnScanError), ERROR_TITLE, errorSummary(message))
         concluded = true
+        runtime.info(`Posted the error check: ${publisher.checkRunUrl ?? ''}`)
       } catch {
         runtime.warning('The Draftt GitHub Check could not be finalized.')
       }
@@ -189,6 +193,10 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
     failOnScanError = inputs.failOnScanError
 
     const workspaceRoot = dependencies.workspaceRoot()
+    // An absolute terraform-root (e.g. ${{ github.workspace }}) is keyed relative to the same
+    // workspace root the plan and source locator use (GITHUB_WORKSPACE, via workspaceRoot()).
+    const scanKey = scanKeyFromTerraformRoot(inputs.terraformRoot, workspaceRoot)
+    runtime.info(`Draftt scan: publish-mode server, endpoint ${endpointHost(inputs.apiUrl)}, scan key ${scanKey}`)
     const plan = await dependencies.readAndSanitizePlan(inputs.planJson, workspaceRoot)
     const locator = await sourceLocatorFor(dependencies, workspaceRoot, headSha, inputs.terraformRoot)
 
@@ -204,9 +212,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       env,
       headSha,
       failOnViolations: inputs.failOnViolations,
-      // An absolute terraform-root (e.g. ${{ github.workspace }}) is keyed relative to the same
-      // workspace root the plan and source locator use (GITHUB_WORKSPACE, via workspaceRoot()).
-      scanKey: scanKeyFromTerraformRoot(inputs.terraformRoot, workspaceRoot),
+      scanKey,
       ...(sourceMap ? { sourceMap } : {}),
     })
     if (env.GITHUB_EVENT_NAME === 'pull_request_target') {
@@ -237,6 +243,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
           const fallback = dependencies.createPublisher(inputs.githubToken, headSha, FALLBACK_CHECK_NAME)
           await fallback.publishCompleted(conclusion, report.title, report.summary, report.annotations)
           outputs = { ...outputs, annotations: fallback.annotationCount, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
+          runtime.info(`Posted the fallback check: ${outputs.checkRunUrl}`)
         } catch {
           runtime.warning('The Draftt fallback check could not be published.')
         }
@@ -247,6 +254,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
 
     await writeWorkflowSummary(runtime, report.summary)
     setOutputs(runtime, outputs)
+    logCompletion(runtime, outputs)
     if (report.violationCount > 0 && inputs.failOnViolations) runtime.setFailed(`Draftt found policy violations in ${report.violationCount} Terraform resources.`)
   } catch (error) {
     const message = safeErrorMessage(error)
@@ -256,6 +264,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
         const fallback = dependencies.createPublisher(githubToken, headSha, FALLBACK_CHECK_NAME)
         await fallback.publishCompleted(dependencies.scanErrorConclusion(failOnScanError), ERROR_TITLE, errorSummary(message), [])
         outputs = { ...outputs, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
+        runtime.info(`Posted the error check: ${outputs.checkRunUrl}`)
       } catch {
         runtime.warning('The Draftt error check could not be published.')
       }
@@ -284,6 +293,21 @@ async function sourceLocatorFor(
     dependencies.runtime.warning('Terraform source mapping is unavailable; findings will remain in the Check summary.')
     return undefined
   }
+}
+
+// Only the host: a path or query string could carry a tenant value or a credential.
+function endpointHost(apiUrl: string): string {
+  try {
+    return new URL(apiUrl).host
+  } catch {
+    return '(invalid api-url)'
+  }
+}
+
+function logCompletion(runtime: ActionRuntime, outputs: Outputs): void {
+  const counts = `violations ${outputs.violations}, warnings ${outputs.warnings}, annotations ${outputs.annotations}`
+  const check = outputs.publisher === 'none' ? 'no check was published' : `check published by ${outputs.publisher}: ${outputs.checkRunUrl}`
+  runtime.info(`Draftt scan completed (${counts}); ${check}`)
 }
 
 function errorSummary(message: string): string {

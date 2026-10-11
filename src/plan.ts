@@ -10,6 +10,9 @@ const SECRET_FIELD_NAMES = new Set([
   'access_token',
   'api_key',
   'api_token',
+  // An IAM trust policy is not a credential, but Draftt does not evaluate it and the provider or a
+  // sensitive() wrapper may mark it, so it is stripped rather than rejected.
+  'assume_role_policy',
   'auth_token',
   'bearer_token',
   'client_certificate',

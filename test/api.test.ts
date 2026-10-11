@@ -82,7 +82,7 @@ test('a 429 waits for Retry-After, capped at 60 s; without the header it keeps a
       if (calls === 1) return new Response('{}', { status: 429, headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter } })
       return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
     }
-    await scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
+    await scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) }, info: () => {} })
     return sleeps
   }
   try {
@@ -149,4 +149,50 @@ test('401 and 413 on /v1/scans are not retried and fail with their fixed message
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('logs the retry wait', async () => {
+  const originalFetch = globalThis.fetch
+  const lines: string[] = []
+  const sleeps: number[] = []
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    if (calls === 1) return new Response('{"message":"planted-backend-body"}', { status: 429, headers: { 'retry-after': '30' } })
+    if (calls === 2) return new Response('{"message":"planted-backend-body"}', { status: 502 })
+    return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    await scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'planted-api-key', '{"plan":"planted-plan-value"}', {
+      sleep: async (ms) => { sleeps.push(ms) },
+      info: (line) => { lines.push(line) },
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.deepEqual(sleeps, [30_000, 1_000])
+  assert.deepEqual(lines, [
+    'Draftt answered 429, retrying in 30 s (attempt 2 of 3)',
+    'Draftt answered 502, retrying in 1 s (attempt 3 of 3)',
+  ])
+  for (const planted of ['planted-api-key', 'planted-plan-value', 'planted-backend-body']) {
+    assert.equal(lines.some((line) => line.includes(planted)), false, planted)
+  }
+})
+
+test('logs the retry wait after a network failure without the error detail', async () => {
+  const originalFetch = globalThis.fetch
+  const lines: string[] = []
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    if (calls === 1) throw new TypeError('fetch failed: planted-network-detail')
+    return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    await scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'k', '{}', { sleep: async () => {}, info: (line) => { lines.push(line) } })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.deepEqual(lines, ['Draftt request failed, retrying in 0.5 s (attempt 2 of 3)'])
 })

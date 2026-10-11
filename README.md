@@ -119,7 +119,13 @@ Outputs contain counts, the check run URL and the publisher only. They never con
 
 The Action keeps only the plan sections Fetcher needs, removes Terraform-marked and recognized credential fields from both sides of an update, and rejects recognized credential formats that remain. If Terraform marks an unexpected field as sensitive, the Action sends nothing and reports a scan error rather than risk an incorrect policy result.
 
+An IAM trust policy (`assume_role_policy`) is stripped the same way: it is not a credential, but Draftt does not evaluate it and the provider or a `sensitive()` wrapper may mark it, so it is removed from values and configuration rather than rejected.
+
 The raw plan and final request are each limited to 50 MiB; the Action drops the source map first when the request would exceed it. The service caps the plan alone at 49 MiB, so a scrubbed plan between 49 and 50 MiB passes the Action and comes back as a scan error ("Draftt rejected the scan request as too large"; the service caps the plan at 49 MiB). Keep plans under 49 MiB. The API key is masked before the plan is read.
+
+## Logs
+
+The job log shows the scan's progress: the publish mode, the `api-url` host (never its path or query) and, in server mode, the scan key when the scan starts; each retry wait (for example `Draftt answered 429, retrying in 30 s (attempt 2 of 3)`); the fallback or error check the Action posts; and on completion the publisher, the violation, warning and annotation counts, and the check URL. The API key, the GitHub token, plan values and Draftt response bodies are never logged.
 
 ## Development
 

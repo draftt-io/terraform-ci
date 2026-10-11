@@ -549,10 +549,10 @@ test('server mode resolves an absolute terraform-root against the workspace root
 
 // The real client behind the scanTerraformPlan dependency, with fetch stubbed and no retry sleep,
 // so these tests pin the error shape the run receives, not just the run's reaction to it.
-function realScanClient(captured: unknown[]): ActionDependencies['scanTerraformPlan'] {
+function realScanClient(captured: unknown[], info: (message: string) => void = () => {}): ActionDependencies['scanTerraformPlan'] {
   return async (apiUrl, apiKey, body) => {
     try {
-      return await scanTerraformPlan(apiUrl, apiKey, body, { sleep: async () => {} })
+      return await scanTerraformPlan(apiUrl, apiKey, body, { sleep: async () => {}, info })
     } catch (error) {
       captured.push(error)
       throw error
@@ -640,4 +640,77 @@ test('server mode on pull_request_target notes that the Draftt key is exposed to
   pullRequest.dependencies.env = () => ({ GITHUB_EVENT_NAME: 'pull_request' })
   await run(pullRequest.dependencies)
   assert.equal(pullRequest.runtime.infos.some((line) => line.includes('pull_request_target')), false)
+})
+
+test('server mode logs the start and the completion', async () => {
+  const h = createHarness({ response: { checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 4 }, payload: PR })
+  await run(h.dependencies)
+  assert.deepEqual(h.runtime.infos, [
+    'Draftt scan: publish-mode server, endpoint draftt-ci.draftt.io, scan key .',
+    'Draftt scan completed (violations 1, warnings 2, annotations 4); check published by server: https://github.com/o/r/runs/1',
+  ])
+
+  const none = createHarness({ githubToken: null, payload: PR })
+  await run(none.dependencies)
+  assert.equal(none.runtime.infos.at(-1), 'Draftt scan completed (violations 1, warnings 2, annotations 0); no check was published')
+})
+
+test('logs the fallback check and the error check it posts', async () => {
+  const fallback = createHarness({ response: { publishError: { code: 'not_bound', message: 'no binding' } }, payload: PR })
+  await run(fallback.dependencies)
+  assert.deepEqual(fallback.runtime.infos.slice(1), [
+    'Posted the fallback check: https://github.com/o/r/runs/9',
+    'Draftt scan completed (violations 1, warnings 2, annotations 1); check published by action: https://github.com/o/r/runs/9',
+  ])
+
+  const error = createHarness({ scanError: new Error('Draftt could not complete the scan'), payload: PR })
+  await run(error.dependencies)
+  assert.deepEqual(error.runtime.infos.slice(1), ['Posted the error check: https://github.com/o/r/runs/9'])
+
+  const unposted = createHarness({ scanError: new Error('Draftt could not complete the scan'), payload: PR })
+  unposted.publisher.failCompleted = true
+  await run(unposted.dependencies)
+  assert.equal(unposted.runtime.infos.some((line) => line.startsWith('Posted')), false)
+})
+
+test('action mode logs the start, the completion and a concluded error check', async () => {
+  const h = createHarness({ publishMode: 'action', payload: PR })
+  await run(h.dependencies)
+  assert.deepEqual(h.runtime.infos, [
+    'Draftt scan: publish-mode action, endpoint draftt-ci.draftt.io',
+    'Draftt scan completed (violations 1, warnings 2, annotations 1); check published by action: https://github.com/o/r/runs/8',
+  ])
+
+  const error = createHarness({ publishMode: 'action', payload: PR, planError: new Error('Invalid plan') })
+  await run(error.dependencies)
+  assert.deepEqual(error.runtime.infos.slice(1), ['Posted the error check: https://github.com/o/r/runs/8'])
+})
+
+test('no logged line carries the Draftt key, the token, a plan value, the api-url query or a backend body', async (t) => {
+  const scenarios: Array<{ options: HarnessOptions; status: number }> = [
+    { options: { response: { checkRunUrl: 'https://github.com/o/r/runs/1' }, payload: PR }, status: 200 },
+    { options: { payload: PR }, status: 200 },
+    { options: { payload: PR }, status: 502 },
+    { options: { publishMode: 'action', payload: PR }, status: 429 },
+  ]
+  for (const scenario of scenarios) {
+    const h = createHarness({ ...scenario.options, apiUrl: 'https://draftt-ci.draftt.io/v1/scans?tenant=planted-query' })
+    const plan: SanitizedPlan = { format_version: '1.2', resource_changes: [{ address: 'aws_s3_bucket.b', change: { after: { bucket: 'planted-plan-value' } } }] }
+    h.dependencies.readAndSanitizePlan = async () => plan
+    h.dependencies.serializeScanRequest = () => ({ body: JSON.stringify({ plan }), sourceMapDropped: false })
+    const serverResponse = { ...scanResponse(), ...scenario.options.response }
+    const fetchMock = t.mock.method(globalThis, 'fetch', async () => (
+      scenario.status === 200
+        ? jsonResponse(200, serverResponse)
+        : jsonResponse(scenario.status, { message: 'planted-backend-body' }, { 'retry-after': '0' })
+    ))
+    h.dependencies.scanTerraformPlan = realScanClient([], (line) => h.runtime.info(line))
+    await run(h.dependencies)
+    fetchMock.mock.restore()
+    const lines = [...h.runtime.infos, ...h.runtime.warnings]
+    assert.ok(h.runtime.infos.length >= 2, 'the run logged progress')
+    for (const planted of ['draftt-key', 'github-token', 'planted-plan-value', 'planted-query', 'planted-backend-body']) {
+      assert.equal(lines.some((line) => line.includes(planted)), false, `${planted} in ${JSON.stringify(lines)}`)
+    }
+  }
 })

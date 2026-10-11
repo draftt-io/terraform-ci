@@ -14,9 +14,17 @@ interface RecordedRequest {
 // @actions/github fixes its API base URL when the module loads, so this file points it at a
 // local server before importing the publisher. Each test file runs in its own process.
 const requests: RecordedRequest[] = []
+// PATCH calls from this one onwards (1-based) are rejected; 0 accepts every call.
+let rejectPatchFrom = 0
 const server = createServer((request, response) => {
   void readBody(request).then((body) => {
     requests.push({ method: request.method ?? '', url: request.url ?? '', body })
+    const patches = requests.filter((r) => r.method === 'PATCH').length
+    if (request.method === 'PATCH' && rejectPatchFrom > 0 && patches >= rejectPatchFrom) {
+      response.writeHead(422, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ message: 'Validation Failed' }))
+      return
+    }
     response.writeHead(request.method === 'POST' ? 201 : 200, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ id: 77, html_url: 'https://github.com/o/r/runs/77' }))
   })
@@ -84,4 +92,21 @@ test('publishCompleted with no annotations is a single create, and start keeps t
   assert.equal(requests[0]?.body.name, 'Draftt Terraform Policy Scan')
   assert.equal(requests[0]?.body.status, 'in_progress')
   assert.equal(legacy.checkRunUrl, 'https://github.com/o/r/runs/77')
+})
+
+test('a fallback publish whose second annotation batch rejects reports only the accepted annotations and warns once', async () => {
+  requests.length = 0
+  rejectPatchFrom = 1
+  const warnings: string[] = []
+  try {
+    const publisher = new CheckPublisher('token', 'd'.repeat(40), FALLBACK_CHECK_NAME, { warning: (message) => { warnings.push(message) } })
+    await publisher.publishCompleted('failure', 'Violations', 'Summary', annotations(120))
+    assert.equal(publisher.annotationCount, 50)
+    assert.equal(publisher.checkRunUrl, 'https://github.com/o/r/runs/77')
+    assert.deepEqual(warnings, ['Only 50 of 120 annotations could be added to the Draftt check.'])
+    // The third batch is not attempted once the second was rejected.
+    assert.deepEqual(requests.map((r) => r.method), ['POST', 'PATCH'])
+  } finally {
+    rejectPatchFrom = 0
+  }
 })
