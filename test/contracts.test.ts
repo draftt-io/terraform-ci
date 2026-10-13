@@ -115,3 +115,48 @@ test('parses mode and conclusion only when they are exactly the known strings', 
   assert.equal('mode' in old, false)
   assert.equal('conclusion' in old, false)
 })
+
+test('keeps an https policyUrl on a Draftt console policy page and drops any other, keeping the policy', () => {
+  const policyUrlOf = (policyUrl: unknown) =>
+    parseScanResponse({ ...scanResponse(), evaluation: { ...scanResponse().evaluation, evaluatedPolicies: [{ policyId: '10', name: 'Supported', policyUrl }] } })
+      .evaluation.evaluatedPolicies?.[0]
+  for (const url of ['https://app.draftt.io/policy/1', 'https://draftt.io/policy/1234567890123456789']) {
+    assert.deepEqual(policyUrlOf(url), { policyId: '10', name: 'Supported', policyUrl: url }, url)
+  }
+  for (const url of [
+    'https://draftt.io.evil.com/policy/1',
+    'https://user@app.draftt.io/policy/1',
+    'https://app.draftt.io:8443/policy/1',
+    'https://app.draftt.io/policy/01',
+    // The service accepts the dev console over http; the Action does not.
+    'http://app.dev.internal.draftt.io/policy/1',
+    'http://app.draftt.io/policy/1',
+    'https://app.draftt.io/policy/1?)](https://evil.com)',
+    'https://app.draftt.io/policy/1?',
+    'https://app.draftt.io/policy/1#',
+    'https://APP.draftt.io/policy/1',
+    ' https://app.draftt.io/po\nlicy/1\n',
+    'https://app.draftt.io/policy/1 ',
+    'https://app.draftt.io/policies/1',
+    'not a url',
+    7,
+  ]) {
+    assert.deepEqual(policyUrlOf(url), { policyId: '10', name: 'Supported' }, JSON.stringify(url))
+  }
+})
+
+test('keeps the exclusion counts only as non-negative safe integers', () => {
+  const evaluationWith = (count: unknown) =>
+    parseScanResponse({ ...scanResponse(), evaluation: { ...scanResponse().evaluation, excludedPolicyCount: count, excludedEvaluatedPolicyCount: count } }).evaluation
+  for (const count of [0, 3]) {
+    const evaluation = evaluationWith(count)
+    assert.equal(evaluation.excludedPolicyCount, count)
+    assert.equal(evaluation.excludedEvaluatedPolicyCount, count)
+  }
+  for (const count of [-1, 1.5, '2', null, Number.MAX_SAFE_INTEGER + 1]) {
+    const evaluation = evaluationWith(count)
+    assert.equal('excludedPolicyCount' in evaluation, false, JSON.stringify(count))
+    assert.equal('excludedEvaluatedPolicyCount' in evaluation, false, JSON.stringify(count))
+  }
+  assert.equal('excludedPolicyCount' in parseScanResponse(scanResponse()).evaluation, false)
+})

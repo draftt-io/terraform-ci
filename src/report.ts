@@ -135,7 +135,10 @@ export async function buildScanReport(
       start_line: resource.location.startLine,
       end_line: resource.location.startLine,
       annotation_level: annotationLevel,
-      title: truncate(`Draftt policy violation: ${resource.component.tfType}`, 255),
+      title: cutOnWord(
+        `${statusLabel(resource.hits[0]?.status ?? '')}: ${resource.hits.length} ${plural(resource.hits.length, 'policy violation')} on ${resource.component.tfType}`,
+        255,
+      ),
       message: truncateBytes(formatViolation(resource), MAX_ANNOTATION_MESSAGE_LENGTH),
     })
   }
@@ -152,7 +155,9 @@ export async function buildScanReport(
   let head: string[]
   if (noPoliciesEvaluated) {
     title = NO_POLICIES_TITLE
-    head = noPoliciesAlert(noPoliciesSelected)
+    head = noPoliciesAlert(
+      noPoliciesSelected ? 'none_selected' : (response.evaluation.excludedEvaluatedPolicyCount ?? 0) > 0 ? 'all_excluded' : 'none_apply',
+    )
   } else if (resources.length === 0) {
     title = incompleteCount > 0 ? `${NO_VIOLATIONS_TITLE} (${incompleteText(incompleteCount)})` : NO_VIOLATIONS_TITLE
     head = [checkedLine(response)]
@@ -175,7 +180,7 @@ export async function buildScanReport(
   const fixed = blockSize(head) + blockSize(note) + blockSize(footer)
   const incompleteRoom = incomplete ? Math.min(INCOMPLETE_RESERVE, blockSize(detailsBlock(incomplete, Number.MAX_SAFE_INTEGER))) : 0
   const overflowRoom = resources.length > 0 ? OVERFLOW_RESERVE : 0
-  const table = violationTable(resources, options.repository, SUMMARY_BUDGET - fixed - incompleteRoom - overflowRoom)
+  const table = violationTable(resources, options.repository, policyUrls(response), SUMMARY_BUDGET - fixed - incompleteRoom - overflowRoom)
   const overflow = overflowBlock(
     resources.filter((resource) => !table.shown.has(resource)),
     SUMMARY_BUDGET - fixed - incompleteRoom - blockSize(table.lines),
@@ -192,13 +197,24 @@ export async function buildScanReport(
   }
 }
 
-function noPoliciesAlert(noPoliciesSelected: boolean): string[] {
-  return [
-    '> [!WARNING]',
-    noPoliciesSelected
-      ? "> **No policies were evaluated.** The workflow passes an empty `policy-ids` list. Remove the `policy-ids` input to use your organization's default policies, or list the policy IDs to enforce."
-      : '> **No policies were evaluated.** No active Draftt policy in your organization applies to this plan.',
-  ]
+const NO_POLICIES_REASONS = {
+  none_selected:
+    "The workflow passes an empty `policy-ids` list. Remove the `policy-ids` input to use your organization's default policies, or list the policy IDs to enforce.",
+  none_apply: 'No active Draftt policy in your organization applies to this plan.',
+  all_excluded: 'Every Draftt policy that applies to this plan is excluded for this repository in the Draftt CI settings.',
+} as const
+
+function noPoliciesAlert(reason: 'none_selected' | 'none_apply' | 'all_excluded'): string[] {
+  return ['> [!WARNING]', `> **No policies were evaluated.** ${NO_POLICIES_REASONS[reason]}`]
+}
+
+// policyId → the policy's page in the Draftt console. The parser keeps only trusted URLs.
+function policyUrls(response: ScanResponse): ReadonlyMap<string, string> {
+  const urls = new Map<string, string>()
+  for (const policy of response.evaluation.evaluatedPolicies ?? []) {
+    if (policy.policyUrl !== undefined) urls.set(policy.policyId, policy.policyUrl)
+  }
+  return urls
 }
 
 function checkedLine(response: ScanResponse): string {
@@ -250,6 +266,8 @@ function footerLine(response: ScanResponse, annotated: number | undefined): stri
   if (merged > 0) parts.push(`${merged} merged into a parent`)
   if (skipped > 0) parts.push(`${skipped} skipped`)
   if (annotated !== undefined) parts.push(`${annotated} ${plural(annotated, 'resource')} annotated in Files changed`)
+  const excluded = response.evaluation.excludedPolicyCount ?? 0
+  if (excluded > 0) parts.push(`${excluded} ${plural(excluded, 'policy', 'policies')} excluded in this repository's Draftt CI settings`)
   parts.push(`[What these statuses mean](${DOCS_URL})`)
   return `<sub>${parts.join(' · ')}</sub>`
 }
@@ -259,6 +277,7 @@ function footerLine(response: ScanResponse, annotated: number | undefined): stri
 function violationTable(
   resources: ResourceEntry[],
   repository: ReportRepository | undefined,
+  urls: ReadonlyMap<string, string>,
   room: number,
 ): { lines: string[]; shown: Set<ResourceEntry> } {
   const lines = ['| Resource | Status | Policy | Change needed |', '|---|---|---|---|']
@@ -266,7 +285,7 @@ function violationTable(
   let used = blockSize(lines)
   for (const resource of resources) {
     if (shown.size >= MAX_TABLE_RESOURCES) break
-    const rows = resourceRows(resource, repository)
+    const rows = resourceRows(resource, repository, urls)
     if (!rows) continue
     const size = rows.reduce((total, row) => total + row.length + 1, 0)
     if (used + size > room) break
@@ -279,18 +298,19 @@ function violationTable(
 
 // One row per policy hit (identical hits collapse into one row with ×N); continuation rows show ″.
 // Undefined when any row cannot fit the line limit: the resource then goes to the overflow list.
-function resourceRows(resource: ResourceEntry, repository: ReportRepository | undefined): string[] | undefined {
+function resourceRows(resource: ResourceEntry, repository: ReportRepository | undefined, urls: ReadonlyMap<string, string>): string[] | undefined {
   const named = hasDistinctNames(resource.hits)
   const groups = groupHits(resource.hits, named)
   if (groups.length === 0) {
-    const row = fitRow(resourceCells(resource, repository), '—', ['—', '—'], ['—', '—', '—'])
+    const row = fitRow(resourceCells(resource, repository), '—', ['—', '—', '—'], ['—', '—', '—'])
     return row === undefined ? undefined : [row]
   }
   const rows: string[] = []
   for (const [index, group] of groups.slice(0, MAX_ROWS_PER_RESOURCE).entries()) {
     const resourceCell = index === 0 ? resourceCells(resource, repository) : ([DITTO, DITTO, DITTO] as const)
     const change = changeText(group.hit, resource.component, tableCode)
-    const row = fitRow(resourceCell, statusCell(group.hit.status), policyCells(group, named), [change.full, change.short, '—'])
+    const url = group.hit.policyId === undefined ? undefined : urls.get(group.hit.policyId)
+    const row = fitRow(resourceCell, statusCell(group.hit.status), policyCells(group, named, url), [change.full, change.short, '—'])
     if (row === undefined) return undefined
     rows.push(row)
   }
@@ -299,22 +319,23 @@ function resourceRows(resource: ResourceEntry, repository: ReportRepository | un
   return rows
 }
 
-// Rows are built from whole cells: a row past the line limit drops detail (the link, the component
-// name, the from-version and date, the source line, then the target version) instead of being cut.
-// A row that still does not fit is undefined, never cut and never an anonymous placeholder.
-const ROW_STEPS: ReadonlyArray<readonly [0 | 1 | 2, 0 | 1, 0 | 1 | 2]> = [
+// Rows are built from whole cells: a row past the line limit drops detail (the policy link, the source
+// link, the component name, the from-version and date, the source line, then the target version)
+// instead of being cut. A row that still does not fit is undefined, never cut and never an anonymous placeholder.
+const ROW_STEPS: ReadonlyArray<readonly [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2]> = [
   [0, 0, 0],
-  [1, 0, 0],
+  [0, 1, 0],
   [1, 1, 0],
-  [1, 1, 1],
-  [2, 1, 1],
-  [2, 1, 2],
+  [1, 2, 0],
+  [1, 2, 1],
+  [2, 2, 1],
+  [2, 2, 2],
 ]
 
 function fitRow(
   resource: readonly [string, string, string],
   status: string,
-  policy: readonly [string, string],
+  policy: readonly [string, string, string],
   change: readonly [string, string, string],
 ): string | undefined {
   for (const [r, p, c] of ROW_STEPS) {
@@ -337,11 +358,16 @@ function statusCell(status: string): string {
   return KNOWN_STATUSES.get(statusKey(status))?.label ?? tableCode(status)
 }
 
-function policyCells(group: HitGroup, named: boolean): readonly [string, string] {
+// [linked, withName, plain]: the policy name links to its console page when the response has a URL
+// for it; the component name (where names differ) and the ×N count follow the link.
+function policyCells(group: HitGroup, named: boolean, url?: string): readonly [string, string, string] {
   const count = group.count > 1 ? ` ×${group.count}` : ''
   const policy = tableCode(group.hit.policyName)
-  const withName = named && group.hit.name ? `${policy} · ${tableCode(group.hit.name)}` : policy
-  return [`${withName}${count}`, `${policy}${count}`]
+  const component = named && group.hit.name ? ` · ${tableCode(group.hit.name)}` : ''
+  const withName = `${policy}${component}${count}`
+  const text = linkText(group.hit.policyName)
+  const linked = url && text.trim() !== '' ? `[${text}](${url})${component}${count}` : withName
+  return [linked, withName, `${policy}${count}`]
 }
 
 // "from → to by date, forced upgrade" from the hit; `code` is tableCode in the summary and
@@ -516,6 +542,10 @@ function statusKey(status: string): string {
   return status.toLowerCase().replace(/[-_\s]+/g, '')
 }
 
+function statusLabel(status: string): string {
+  return KNOWN_STATUSES.get(statusKey(status))?.label ?? 'Other'
+}
+
 function statusRank(status: string): number {
   return KNOWN_STATUSES.get(statusKey(status))?.rank ?? OTHER_STATUS_RANK
 }
@@ -590,6 +620,13 @@ function plainValue(value: string): string {
   return capped.replace(/[\r\n]+/g, ' ')
 }
 
+// Link text from an untrusted value: capped and on one line, with every character that could end the
+// link (\ [ ] ( )), open a code span or HTML (` <) or split a table cell (|) backslash-escaped. Inside a
+// link GitHub turns no @mention, #ref or URL into a link of its own.
+export function linkText(value: string): string {
+  return plainValue(value).replace(/[\\`[\]()<|]/g, '\\$&')
+}
+
 // Every value that originates from the plan, fetcher or analyzer is rendered as a code span:
 // inside backticks, @mentions, links, images, HTML and #refs are literal. Capped so one
 // for_each key cannot fill the comment.
@@ -623,6 +660,14 @@ function joinWithinLine(prefix: string, spans: string[], suffix = ''): string {
     line = candidate
   }
   return `${line}${suffix}`
+}
+
+// At most `maximum` characters, cut before a space (no ellipsis); a single longer word is sliced.
+export function cutOnWord(value: string, maximum: number): string {
+  if (value.length <= maximum) return value
+  const space = value.lastIndexOf(' ', maximum)
+  const cut = space > 0 ? value.slice(0, space).trimEnd() : ''
+  return cut === '' ? value.slice(0, maximum) : cut
 }
 
 function truncate(value: string, maximum: number): string {

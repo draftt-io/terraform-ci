@@ -28,7 +28,7 @@ test('creates one plain-text source annotation per violating component', async (
       start_line: 1,
       end_line: 1,
       annotation_level: 'warning',
-      title: 'Draftt policy violation: aws_db_instance',
+      title: 'Outdated: 1 policy violation on aws_db_instance',
       message: ['1 policy violation on aws_db_instance.primary', '', 'Outdated: Supported version', 'Change needed: 14 → 16'].join('\n'),
     })
   } finally {
@@ -179,6 +179,9 @@ test('matches every case of the parity fixture shared with draftt-ci', async () 
       'overflow above the table budget',
       'no Draftt-tracked resources',
       'row over the line limit',
+      'exclusions footer',
+      'every evaluated policy excluded',
+      'excluded policy not evaluated',
     ],
   )
   for (const entry of fixture.cases) {

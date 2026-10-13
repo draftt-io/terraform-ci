@@ -32,12 +32,15 @@ export interface ScanResponse {
   }
   components: FlaggedComponent[]
   evaluation: {
-    evaluatedPolicies?: Array<{ policyId: string; name: string }>
+    evaluatedPolicies?: Array<{ policyId: string; name: string; policyUrl?: string }>
     unevaluatedPolicies: Array<{ policyId: string; name?: string; reason: string }>
     componentsWithGaps: Array<{
       address: string
       policyGaps: Array<{ policyName: string; reason: string; missingAttributes?: string[] }>
     }>
+    // Set only when the server applied the repository's exclusions.
+    excludedPolicyCount?: number
+    excludedEvaluatedPolicyCount?: number
   }
   coverage: {
     unmappedResources: Array<{ address: string; reason: string }>
@@ -100,6 +103,8 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
           }),
         }
       }),
+      ...optionalCount('excludedPolicyCount', evaluation.excludedPolicyCount),
+      ...optionalCount('excludedEvaluatedPolicyCount', evaluation.excludedEvaluatedPolicyCount),
     },
     coverage: {
       unmappedResources: array(coverage.unmappedResources, 'coverage.unmappedResources').map((item) => {
@@ -181,12 +186,54 @@ function parseFlaggedComponent(value: unknown, index: number): FlaggedComponent 
 
 // Read when present and dropped entry by entry when malformed: a response without the field
 // (an older server) still parses, and the report falls back to "N components checked".
-function optionalEvaluatedPolicies(value: unknown): { evaluatedPolicies?: Array<{ policyId: string; name: string }> } {
+// A policyUrl outside the Draftt console's policy pages is dropped, never the policy.
+function optionalEvaluatedPolicies(value: unknown): { evaluatedPolicies?: Array<{ policyId: string; name: string; policyUrl?: string }> } {
   if (!Array.isArray(value)) return {}
   const evaluatedPolicies = value.flatMap((item) =>
-    isRecord(item) && typeof item.policyId === 'string' && typeof item.name === 'string' ? [{ policyId: item.policyId, name: item.name }] : [],
+    isRecord(item) && typeof item.policyId === 'string' && typeof item.name === 'string'
+      ? [
+          {
+            policyId: item.policyId,
+            name: item.name,
+            ...(typeof item.policyUrl === 'string' && isTrustedPolicyUrl(item.policyUrl) ? { policyUrl: item.policyUrl } : {}),
+          },
+        ]
+      : [],
   )
   return { evaluatedPolicies }
+}
+
+const POLICY_PATH = /^\/policy\/[1-9][0-9]{0,18}$/
+
+// The https-only copy of draftt-ci's isTrustedPolicyUrl (src/scan/policyLinks.ts), which also accepts the
+// dev console over http. The link must point at a Draftt console policy page and be canonical (href equals
+// the input), so whitespace, control characters, an upper-case host, encoded digits and an empty `?` or
+// `#` are rejected and the string the report renders is exactly what was checked.
+function isTrustedPolicyUrl(value: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return false
+  }
+  return (
+    parsed.protocol === 'https:' &&
+    parsed.username === '' &&
+    parsed.password === '' &&
+    parsed.port === '' &&
+    parsed.search === '' &&
+    parsed.hash === '' &&
+    parsed.href === value &&
+    // An empty `?` or `#` stays in href while search and hash read ''.
+    parsed.href === `${parsed.origin}${parsed.pathname}` &&
+    (parsed.hostname === 'draftt.io' || parsed.hostname.endsWith('.draftt.io')) &&
+    POLICY_PATH.test(parsed.pathname)
+  )
+}
+
+// Present only when the server applied a repository's exclusions; anything but a non-negative integer is dropped.
+function optionalCount<K extends string>(key: K, value: unknown): Partial<Record<K, number>> {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? ({ [key]: value } as Partial<Record<K, number>>) : {}
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
