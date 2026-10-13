@@ -82,13 +82,16 @@ export async function scanTerraformPlan(
         return parseScanResponse(value)
       }
 
-      if (response.status === 403 && (await errorCode(response)) === 'owner_mismatch') {
+      const error = BODY_READ_STATUS.has(response.status) ? await errorBody(response) : {}
+      if (response.status === 403 && error.code === 'owner_mismatch') {
         throw new ScanRequestFailure('Draftt CI is bound to a different GitHub organization', 403, 'owner_mismatch')
       }
       if (response.status === 429) retryDelay = retryAfterMs(response.headers.get('retry-after')) ?? retryDelay
-      lastFailure = publicStatusMessage(response.status)
+      lastFailure = publicStatusMessage(response.status, error)
       retryReason = `Draftt answered ${response.status}`
-      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new ScanRequestFailure(lastFailure, response.status)
+      // 408 upload_timeout and 422 too_many_scan_keys are final: neither is in RETRYABLE_STATUS.
+      const code = response.status === 408 || response.status === 422 ? error.code : undefined
+      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new ScanRequestFailure(lastFailure, response.status, code)
     } catch (error) {
       if (error instanceof Error && !isRetryableNetworkError(error)) throw error
       const timedOut = error instanceof Error && error.name === 'TimeoutError'
@@ -103,13 +106,29 @@ export async function scanTerraformPlan(
   throw new Error(lastFailure)
 }
 
-// Reads only the code field of an error body; the message is never surfaced except for owner_mismatch.
-async function errorCode(response: Response): Promise<string | undefined> {
+// Error bodies are read only for these statuses: 403 for owner_mismatch, 408 and 422 for their
+// codes and the service message. Any other status's body is never read, so never echoed.
+const BODY_READ_STATUS = new Set([403, 408, 422])
+const MAX_SERVICE_MESSAGE_CHARS = 300
+const TOO_MANY_SCAN_KEYS = 'This commit already has 50 Draftt CI scans, the most Draftt CI accepts per commit (one per terraform-root).'
+
+interface ErrorBody {
+  code?: string
+  message?: string
+}
+
+async function errorBody(response: Response): Promise<ErrorBody> {
+  let value: unknown
   try {
-    const value: unknown = await response.json()
-    return typeof value === 'object' && value !== null && typeof (value as { code?: unknown }).code === 'string' ? (value as { code: string }).code : undefined
+    value = await response.json()
   } catch {
-    return undefined
+    return {}
+  }
+  if (typeof value !== 'object' || value === null) return {}
+  const { code, message } = value as { code?: unknown; message?: unknown }
+  return {
+    ...(typeof code === 'string' ? { code } : {}),
+    ...(typeof message === 'string' && message.trim() !== '' ? { message: message.replace(/\s+/g, ' ').trim().slice(0, MAX_SERVICE_MESSAGE_CHARS) } : {}),
   }
 }
 
@@ -125,7 +144,9 @@ function validateEndpoint(value: string): URL {
   return endpoint
 }
 
-function publicStatusMessage(status: number): string {
+function publicStatusMessage(status: number, error: ErrorBody = {}): string {
+  if (status === 422 && error.code === 'too_many_scan_keys') return TOO_MANY_SCAN_KEYS
+  if ((status === 408 || status === 422) && error.message) return error.message
   if (status === 400) return 'Draftt rejected the scan request'
   if (status === 401 || status === 403) return 'Draftt authentication failed'
   if (status === 413) return 'Draftt rejected the scan request as too large'

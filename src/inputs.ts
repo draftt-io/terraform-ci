@@ -9,7 +9,10 @@ export interface ActionInputs {
   githubToken?: string
   terraformRoot: string
   policyIds?: string[]
+  // Deprecated: decides the verdict only in the v0.1.1 flow; in the server flow the Draftt CI mode does.
   failOnViolations: boolean
+  // As given: '' when unset, which the server flow needs to decide on the deprecation warning.
+  failOnViolationsRaw: '' | 'true' | 'false'
   failOnScanError: boolean
   publishMode: PublishMode
 }
@@ -21,6 +24,7 @@ export interface InputReader {
 export function readInputs(core: InputReader): ActionInputs {
   const policyIds = parsePolicyIds(core.getInput('policy-ids'))
   const githubToken = core.getInput('github-token')
+  const failOnViolationsRaw = parseOptionalBoolean(core.getInput('fail-on-violations'), 'fail-on-violations')
   return {
     planJson: core.getInput('plan-json', { required: true }),
     apiUrl: core.getInput('api-url', { required: true }),
@@ -28,7 +32,8 @@ export function readInputs(core: InputReader): ActionInputs {
     ...(githubToken === '' ? {} : { githubToken }),
     terraformRoot: core.getInput('terraform-root', { required: true }),
     ...(policyIds === undefined ? {} : { policyIds }),
-    failOnViolations: parseBoolean(core.getInput('fail-on-violations'), 'fail-on-violations'),
+    failOnViolations: failOnViolationsRaw === 'true',
+    failOnViolationsRaw,
     failOnScanError: parseBoolean(core.getInput('fail-on-scan-error'), 'fail-on-scan-error'),
     publishMode: parsePublishMode(core.getInput('publish-mode')),
   }
@@ -75,6 +80,12 @@ export function parsePolicyIds(value: string): string[] | undefined {
     throw new Error('policy-ids must be a JSON array of decimal-string ids')
   }
   return parsed
+}
+
+// action.yml gives fail-on-violations no default, so '' is a valid, unset value (false).
+function parseOptionalBoolean(value: string, name: string): '' | 'true' | 'false' {
+  if (value === '' || value === 'true' || value === 'false') return value
+  throw new Error(`${name} must be true or false`)
 }
 
 function parseBoolean(value: string, name: string): boolean {

@@ -95,3 +95,23 @@ test('keeps the fields the report renders and drops malformed entries of the opt
   assert.deepEqual(parsed.evaluation.evaluatedPolicies, [{ policyId: '10', name: 'Supported version' }])
   assert.deepEqual(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.missingAttributes, ['engine_version'])
 })
+
+test('parses mode and conclusion only when they are exactly the known strings', () => {
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', mode: 'blocking', conclusion: 'failure' })
+  assert.equal(parsed.mode, 'blocking')
+  assert.equal(parsed.conclusion, 'failure')
+  for (const mode of ['advisory', 'blocking'] as const) assert.equal(parseScanResponse({ ...scanResponse(), mode }).mode, mode)
+  for (const conclusion of ['success', 'neutral', 'failure'] as const) assert.equal(parseScanResponse({ ...scanResponse(), conclusion }).conclusion, conclusion)
+
+  const odd = parseScanResponse({ ...scanResponse(), mode: 'Blocking', conclusion: 'skipped' })
+  assert.equal('mode' in odd, false)
+  assert.equal('conclusion' in odd, false)
+  for (const value of [null, 1, true, {}, 'timed_out', ' failure']) {
+    const parsedValue = parseScanResponse({ ...scanResponse(), mode: value, conclusion: value })
+    assert.equal(parsedValue.mode, undefined)
+    assert.equal(parsedValue.conclusion, undefined)
+  }
+  const old = parseScanResponse(scanResponse())
+  assert.equal('mode' in old, false)
+  assert.equal('conclusion' in old, false)
+})

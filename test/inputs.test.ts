@@ -75,3 +75,15 @@ test('scanKeyFromTerraformRoot relativises an absolute root inside the workspace
   assert.throws(() => scanKeyFromTerraformRoot(workspace), /terraform-root must be a relative path/)
   assert.throws(() => scanKeyFromTerraformRoot('/'), /terraform-root must be a relative path/)
 })
+
+test('fail-on-violations: an empty value is unset (false) and the raw value is kept', () => {
+  const base = { 'plan-json': 'p', 'api-url': 'https://x/v1/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-scan-error': 'false' }
+  const unset = readInputs(reader(base))
+  assert.equal(unset.failOnViolations, false)
+  assert.equal(unset.failOnViolationsRaw, '')
+  const on = readInputs(reader({ ...base, 'fail-on-violations': 'true' }))
+  assert.deepEqual([on.failOnViolations, on.failOnViolationsRaw], [true, 'true'])
+  const off = readInputs(reader({ ...base, 'fail-on-violations': 'false' }))
+  assert.deepEqual([off.failOnViolations, off.failOnViolationsRaw], [false, 'false'])
+  assert.throws(() => readInputs(reader({ ...base, 'fail-on-violations': 'yes' })), /fail-on-violations must be true or false/)
+})

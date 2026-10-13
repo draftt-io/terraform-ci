@@ -3,7 +3,7 @@ import { mkdtemp, open, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { MAX_PLAN_BYTES, readAndSanitizePlan, sanitizePlan, serializeScanRequest } from '../src/plan.ts'
+import { MAX_PLAN_BYTES, MAX_PLAN_FILE_BYTES, MAX_REQUEST_BYTES, readAndSanitizePlan, sanitizePlan, serializeScanRequest } from '../src/plan.ts'
 
 function basePlan(): Record<string, unknown> {
   return {
@@ -270,7 +270,7 @@ test('rejects oversized and outside-workspace plan files before parsing', async 
   try {
     const oversizedPath = path.join(workspace, 'oversized.json')
     const file = await open(oversizedPath, 'w')
-    await file.truncate(MAX_PLAN_BYTES + 1)
+    await file.truncate(MAX_PLAN_FILE_BYTES + 1)
     await file.close()
     await assert.rejects(() => readAndSanitizePlan('oversized.json', workspace), /50 MiB input limit/)
 
@@ -310,10 +310,10 @@ test('rejects malformed actions and mirrors before serialization', () => {
   )
 })
 
-test('serializeScanRequest drops the source map first when the body would exceed the limit', () => {
-  // A plan just under the limit: the plan alone fits, the plan plus a 1,000-entry map does not.
+test('serializeScanRequest drops the source map first when the body would exceed the request limit', () => {
+  // A plan just under the 49 MiB plan cap: the plan alone fits, the plan plus a 1.3 MB map does not.
   const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
-  const sourceMap = Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => [`r.${i}`, { path: 'x'.repeat(100), startLine: 1 }]))
+  const sourceMap = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`r.${i}`, { path: 'x'.repeat(100), startLine: 1 }]))
   const github = { repositoryId: 1, repositoryOwnerId: 2, pullRequestNumber: 3, headSha: 'a'.repeat(40), scanKey: '.', runId: 1, runAttempt: 1, failOnViolations: false, sourceMap }
   const { body, sourceMapDropped } = serializeScanRequest(plan, undefined, github)
   assert.equal(sourceMapDropped, true)
@@ -322,6 +322,55 @@ test('serializeScanRequest drops the source map first when the body would exceed
   const small = serializeScanRequest({ format_version: '1.2', resource_changes: [] }, ['1'], { ...github, sourceMap: { 'a.b': { path: 'a.tf', startLine: 1 } } })
   assert.equal(small.sourceMapDropped, false)
   assert.deepEqual(Object.keys(JSON.parse(small.body)), ['plan', 'policyIds', 'github'])
+})
+
+const MiB = 1024 * 1024
+
+test('the size caps: 50 MiB plan file, 49 MiB serialized plan, 50 MiB request', () => {
+  assert.equal(MAX_PLAN_FILE_BYTES, 50 * MiB)
+  assert.equal(MAX_PLAN_BYTES, 49 * MiB)
+  assert.equal(MAX_REQUEST_BYTES, 50 * MiB)
+})
+
+test('serializeScanRequest builds exactly what JSON.stringify of the request builds', () => {
+  const plan = { format_version: '1.2', resource_changes: [{ address: 'a.b', change: { after: { name: 'caf\u00e9 "q" \\' } } }] }
+  const github = { repositoryId: 1, repositoryOwnerId: 2, pullRequestNumber: 3, headSha: 'a'.repeat(40), scanKey: '.', runId: 1, runAttempt: 1, failOnViolations: false }
+  assert.equal(serializeScanRequest(plan, ['1', '2'], github).body, JSON.stringify({ plan, policyIds: ['1', '2'], github }))
+  assert.equal(serializeScanRequest(plan, undefined, undefined).body, JSON.stringify({ plan }))
+  assert.equal(serializeScanRequest(plan, [], undefined).body, JSON.stringify({ plan, policyIds: [] }))
+})
+
+test('a serialized plan over 49 MiB is refused with the plan-size message', () => {
+  const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(Math.round(49.5 * MiB)) }] }
+  assert.throws(
+    () => serializeScanRequest(plan, undefined),
+    (error: unknown) => error instanceof Error && error.message === 'The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.',
+  )
+})
+
+test('a request over 50 MiB is refused even when the plan fits under 49 MiB', () => {
+  const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
+  // About 1.3 MB of policy ids push the request over 50 MiB; there is no source map to drop.
+  const policyIds = Array.from({ length: 100_000 }, (_, i) => String(1_000_000_000 + i))
+  assert.throws(() => serializeScanRequest(plan, policyIds), /Scrubbed scan request exceeds the 50 MiB request limit/)
+})
+
+test('a 49.9 MiB plan file is read and parsed; a 50.1 MiB file is refused before parsing', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'terraform-plan-size-'))
+  try {
+    const under = await open(path.join(workspace, 'under.json'), 'w')
+    await under.truncate(Math.round(49.9 * MiB))
+    await under.close()
+    // Zero bytes are not JSON: reaching the parser proves the size check let the file through.
+    await assert.rejects(() => readAndSanitizePlan('under.json', workspace), /Plan JSON is not valid JSON/)
+
+    const over = await open(path.join(workspace, 'over.json'), 'w')
+    await over.truncate(Math.round(50.1 * MiB))
+    await over.close()
+    await assert.rejects(() => readAndSanitizePlan('over.json', workspace), /Plan JSON exceeds the 50 MiB input limit/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
 })
 
 test('strips assume_role_policy when marked sensitive', () => {

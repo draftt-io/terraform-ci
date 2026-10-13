@@ -100,7 +100,9 @@ class FakePublisher implements CheckPublisherLike {
 interface HarnessOptions {
   externalFork?: boolean
   failOnViolations?: boolean
+  failOnViolationsRaw?: '' | 'true' | 'false'
   failOnScanError?: boolean
+  terraformRoot?: string
   report?: ScanReport
   planError?: Error
   workspaceStatus?: WorkspaceSourceStatus
@@ -120,7 +122,7 @@ function createHarness(options: HarnessOptions = {}): {
   runtime: FakeRuntime
   publisher: FakePublisher
   events: string[]
-  calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined> }
+  calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: Array<'warning' | 'failure'> }
 } {
   const failOnViolations = options.failOnViolations ?? false
   const failOnScanError = options.failOnScanError ?? false
@@ -131,14 +133,15 @@ function createHarness(options: HarnessOptions = {}): {
   const runtime = new FakeRuntime(runtimeInputs)
   const events: string[] = []
   const publisher = new FakePublisher(events)
-  const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined> }
+  const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as Array<'warning' | 'failure'> }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
     apiUrl,
     apiKey: 'draftt-key',
     ...(options.githubToken === null ? {} : { githubToken: options.githubToken ?? 'github-token' }),
-    terraformRoot: '.',
+    terraformRoot: options.terraformRoot ?? '.',
     failOnViolations,
+    failOnViolationsRaw: options.failOnViolationsRaw ?? (options.failOnViolations === undefined ? '' : options.failOnViolations ? 'true' : 'false'),
     failOnScanError,
     publishMode: options.publishMode ?? 'server',
   }
@@ -217,7 +220,10 @@ function createHarness(options: HarnessOptions = {}): {
         if (options.scanError) throw options.scanError
         return { ...response, ...options.response }
       },
-      buildScanReport: async () => report,
+      buildScanReport: async (_response, _locator, level) => {
+        calls.levels.push(level)
+        return report
+      },
       completedConclusion,
       scanErrorConclusion,
       workspaceRoot: () => '/workspace',
@@ -446,10 +452,10 @@ test('owner_mismatch surfaces the binding message', async () => {
   assertOutputFields(h.runtime, { 'scan-status': 'error' })
 })
 
-test('server mode fails the job only for violations with fail-on-violations', async () => {
+test('server mode ignores fail-on-violations for the verdict but still sends it in the github block', async () => {
   const h = createHarness({ failOnViolations: true, response: { checkRunUrl: 'https://github.com/o/r/runs/1' }, payload: PR })
   await run(h.dependencies)
-  assert.deepEqual(h.runtime.failures, ['Draftt found policy violations in 1 Terraform resources.'])
+  assert.deepEqual(h.runtime.failures, [])
   assert.equal(h.calls.serializedGithub[0]?.failOnViolations, true)
 })
 
@@ -608,12 +614,12 @@ test('server mode sends failOnViolations false in the github block when enforcem
   assert.deepEqual(h.runtime.failures, [])
 })
 
-test('the fallback check concludes failure for violations with fail-on-violations and the job fails', async () => {
-  const h = createHarness({ failOnViolations: true, response: { publishError: { code: 'not_bound', message: 'm' } }, payload: PR })
+test('the fallback check concludes failure for violations in blocking mode and the job fails', async () => {
+  const h = createHarness({ response: { mode: 'blocking', publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
   await run(h.dependencies)
   assert.deepEqual(h.publisher.names, [FALLBACK_CHECK_NAME])
   assert.deepEqual(h.publisher.completed, [{ conclusion: 'failure', title: 'One violation', annotations: 1 }])
-  assert.deepEqual(h.runtime.failures, ['Draftt found policy violations in 1 Terraform resources.'])
+  assert.deepEqual(h.runtime.failures, ['Draftt CI is in blocking mode and found policy violations in 1 Terraform resource. See the check: https://github.com/o/r/runs/9'])
   assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'action' })
   assert.deepEqual(h.runtime.summaries, ['Summary'])
 })
@@ -647,6 +653,7 @@ test('server mode logs the start and the completion', async () => {
   await run(h.dependencies)
   assert.deepEqual(h.runtime.infos, [
     'Draftt scan: publish-mode server, endpoint draftt-ci.draftt.io, scan key .',
+    NO_MODE_LINE,
     'Draftt scan completed (violations 1, warnings 2, annotations 4); check published by server: https://github.com/o/r/runs/1',
   ])
 
@@ -712,5 +719,203 @@ test('no logged line carries the Draftt key, the token, a plan value, the api-ur
     for (const planted of ['draftt-key', 'github-token', 'planted-plan-value', 'planted-query', 'planted-backend-body']) {
       assert.equal(lines.some((line) => line.includes(planted)), false, `${planted} in ${JSON.stringify(lines)}`)
     }
+  }
+})
+
+// ---- Verdict from the Draftt CI mode (M3b/c)
+
+const NO_MODE_LINE = 'Draftt CI did not report a mode; update the Draftt CI service.'
+const ADVISORY_DEPRECATION = 'fail-on-violations is ignored: Draftt CI is in advisory mode for this repository, so this check does not fail. A Draftt Admin can switch to blocking mode in the Draftt console.'
+const GENERIC_DEPRECATION = 'fail-on-violations is ignored when Draftt CI publishes the check; a Draftt Admin sets the mode in the Draftt console (Integrations › Draftt CI).'
+const PUBLISH_FAILURE = 'Draftt CI could not publish its check, so the required Draftt check will pass when it times out.'
+const PUBLISH_FAILURE_WITH_FALLBACK = `${PUBLISH_FAILURE} The "Draftt Terraform Policy Scan (Action)" check shows the result.`
+const RUN_URL = 'https://github.com/o/r/runs/1'
+const MODE_SUFFIX = (mode: string): string => `; mode ${mode} (set in the Draftt console: Integrations › Draftt CI)`
+
+function twoViolationReport(): ScanReport {
+  return { title: 'Two violations', summary: 'Summary', annotations: [], violationCount: 2, warningCount: 0 }
+}
+
+test('server mode takes the annotation level from the mode, never from fail-on-violations', async () => {
+  const cases: Array<[Partial<ScanResponse>, boolean, 'warning' | 'failure']> = [
+    [{ mode: 'blocking' }, false, 'failure'],
+    [{ mode: 'advisory' }, true, 'warning'],
+    [{}, true, 'warning'],
+    [{ mode: 'blocking', checkRunUrl: RUN_URL }, false, 'failure'],
+  ]
+  for (const [response, failOnViolations, level] of cases) {
+    const h = createHarness({ response, failOnViolations, payload: PR })
+    await run(h.dependencies)
+    assert.deepEqual(h.calls.levels, [level], JSON.stringify(response))
+  }
+})
+
+test('server mode prints the fail-on-violations deprecation once, worded by the input and the mode', async () => {
+  const cases: Array<[ActionInputs['failOnViolationsRaw'], Partial<ScanResponse>, string | undefined]> = [
+    ['true', { mode: 'advisory', checkRunUrl: RUN_URL, conclusion: 'neutral' }, ADVISORY_DEPRECATION],
+    ['true', { mode: 'blocking', checkRunUrl: RUN_URL, conclusion: 'failure' }, GENERIC_DEPRECATION],
+    ['true', { checkRunUrl: RUN_URL }, GENERIC_DEPRECATION],
+    ['false', { mode: 'advisory', checkRunUrl: RUN_URL, conclusion: 'neutral' }, GENERIC_DEPRECATION],
+    ['false', { mode: 'blocking', checkRunUrl: RUN_URL, conclusion: 'failure' }, GENERIC_DEPRECATION],
+    ['', { mode: 'advisory', checkRunUrl: RUN_URL, conclusion: 'neutral' }, undefined],
+    ['', { mode: 'blocking', checkRunUrl: RUN_URL, conclusion: 'failure' }, undefined],
+  ]
+  for (const [raw, response, expected] of cases) {
+    const h = createHarness({ failOnViolationsRaw: raw, failOnViolations: raw === 'true', response, payload: PR })
+    await run(h.dependencies)
+    const deprecations = h.runtime.warnings.filter((w) => w.startsWith('fail-on-violations is ignored'))
+    assert.deepEqual(deprecations, expected ? [expected] : [], `${raw} ${JSON.stringify(response)}`)
+  }
+})
+
+test('server mode prints the generic deprecation when the scan errors before an answer', async () => {
+  const h = createHarness({ failOnViolationsRaw: 'true', failOnViolations: true, scanError: new Error('Draftt could not complete the scan'), payload: PR })
+  await run(h.dependencies)
+  assert.deepEqual(h.runtime.warnings.filter((w) => w.startsWith('fail-on-violations')), [GENERIC_DEPRECATION])
+})
+
+test('the v0.1.1 flow prints no deprecation and keeps honouring fail-on-violations', async () => {
+  const action = createHarness({ publishMode: 'action', failOnViolations: true, response: { mode: 'advisory', conclusion: 'neutral' }, payload: PR })
+  await run(action.dependencies)
+  assert.equal(action.runtime.warnings.some((w) => w.startsWith('fail-on-violations')), false)
+  assert.deepEqual(action.publisher.conclusions, ['failure'])
+  assert.deepEqual(action.calls.levels, ['failure'])
+  assert.deepEqual(action.runtime.failures, ['Draftt found policy violations in 1 Terraform resources.'])
+
+  const quiet = createHarness({ publishMode: 'action', response: { mode: 'blocking', conclusion: 'failure' }, payload: PR })
+  await run(quiet.dependencies)
+  assert.deepEqual(quiet.publisher.conclusions, ['neutral'])
+  assert.deepEqual(quiet.calls.levels, ['warning'])
+  assert.deepEqual(quiet.runtime.failures, [])
+  assert.equal(quiet.runtime.infos.some((line) => line.includes('mode blocking') || line === NO_MODE_LINE), false)
+
+  const push = createHarness({ failOnViolations: true, response: { mode: 'advisory' } })
+  await run(push.dependencies)
+  assert.equal(push.runtime.warnings.some((w) => w.startsWith('fail-on-violations')), false)
+  assert.deepEqual(push.runtime.failures, ['Draftt found policy violations in 1 Terraform resources.'])
+})
+
+test('server mode fails the job when the server conclusion is failure, in either mode', async () => {
+  const blocking = createHarness({ response: { mode: 'blocking', conclusion: 'failure', checkRunUrl: RUN_URL }, payload: PR })
+  await run(blocking.dependencies)
+  assert.deepEqual(blocking.runtime.failures, [`Draftt CI is in blocking mode and found policy violations in 1 Terraform resource. See the check: ${RUN_URL}`])
+
+  // Review Focus 5: the server is the authority.
+  const advisory = createHarness({ response: { mode: 'advisory', conclusion: 'failure', checkRunUrl: RUN_URL }, payload: PR, report: twoViolationReport() })
+  await run(advisory.dependencies)
+  assert.deepEqual(advisory.runtime.failures, [`Draftt CI is in blocking mode and found policy violations in 2 Terraform resources. See the check: ${RUN_URL}`])
+
+  for (const conclusion of ['success', 'neutral'] as const) {
+    const passing = createHarness({ failOnViolations: true, response: { mode: 'blocking', conclusion, checkRunUrl: RUN_URL }, payload: PR })
+    await run(passing.dependencies)
+    assert.deepEqual(passing.runtime.failures, [], conclusion)
+  }
+})
+
+test('a checkRunUrl without conclusion (an older service) does not fail the job', async () => {
+  const h = createHarness({ failOnViolations: true, response: { mode: 'blocking', checkRunUrl: RUN_URL }, payload: PR })
+  await run(h.dependencies)
+  assert.deepEqual(h.runtime.failures, [])
+})
+
+test('without a published check the fallback rule decides: blocking and violations fail, advisory and no mode never do', async () => {
+  const blocking = createHarness({ response: { mode: 'blocking' }, payload: PR, report: twoViolationReport() })
+  await run(blocking.dependencies)
+  assert.deepEqual(blocking.publisher.completed.map((c) => c.conclusion), ['failure'])
+  assert.deepEqual(blocking.runtime.failures, ['Draftt CI is in blocking mode and found policy violations in 2 Terraform resources. See the check: https://github.com/o/r/runs/9'])
+
+  const noToken = createHarness({ githubToken: null, response: { mode: 'blocking' }, payload: PR })
+  await run(noToken.dependencies)
+  assert.deepEqual(noToken.runtime.failures, ['Draftt CI is in blocking mode and found policy violations in 1 Terraform resource.'])
+
+  const advisory = createHarness({ failOnViolations: true, response: { mode: 'advisory', publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
+  await run(advisory.dependencies)
+  assert.deepEqual(advisory.publisher.completed.map((c) => c.conclusion), ['neutral'])
+  assert.deepEqual(advisory.runtime.failures, [])
+
+  const noMode = createHarness({ failOnViolations: true, payload: PR })
+  await run(noMode.dependencies)
+  assert.deepEqual(noMode.publisher.completed.map((c) => c.conclusion), ['neutral'])
+  assert.deepEqual(noMode.runtime.failures, [])
+
+  const clean = createHarness({ response: { mode: 'blocking' }, payload: PR, report: { title: 'No policy violations found', summary: 'S', annotations: [], violationCount: 0, warningCount: 0 } })
+  await run(clean.dependencies)
+  assert.deepEqual(clean.publisher.completed.map((c) => c.conclusion), ['success'])
+  assert.deepEqual(clean.runtime.failures, [])
+})
+
+test('blocking without a published check warns for the root scan key only, naming the fallback check when it was posted', async () => {
+  const withToken = createHarness({ response: { mode: 'blocking', publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
+  await run(withToken.dependencies)
+  assert.deepEqual(withToken.runtime.warnings.filter((w) => w.startsWith(PUBLISH_FAILURE)), [PUBLISH_FAILURE_WITH_FALLBACK])
+
+  const withoutToken = createHarness({ githubToken: null, response: { mode: 'blocking', publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
+  await run(withoutToken.dependencies)
+  assert.deepEqual(withoutToken.runtime.warnings.filter((w) => w.startsWith(PUBLISH_FAILURE)), [PUBLISH_FAILURE])
+
+  const unposted = createHarness({ response: { mode: 'blocking' }, payload: PR })
+  unposted.publisher.failCompleted = true
+  await run(unposted.dependencies)
+  assert.deepEqual(unposted.runtime.warnings.filter((w) => w.startsWith(PUBLISH_FAILURE)), [PUBLISH_FAILURE])
+
+  const nonRoot = createHarness({ terraformRoot: 'modules/eks', response: { mode: 'blocking' }, payload: PR })
+  await run(nonRoot.dependencies)
+  assert.equal(nonRoot.calls.serializedGithub[0]?.scanKey, 'modules/eks')
+  assert.equal(nonRoot.runtime.warnings.some((w) => w.startsWith(PUBLISH_FAILURE)), false)
+
+  for (const response of [{ mode: 'advisory' as const }, { mode: 'blocking' as const, checkRunUrl: RUN_URL, conclusion: 'failure' as const }, {}]) {
+    const h = createHarness({ response, payload: PR })
+    await run(h.dependencies)
+    assert.equal(h.runtime.warnings.some((w) => w.startsWith(PUBLISH_FAILURE)), false, JSON.stringify(response))
+  }
+})
+
+test('a response without mode logs the no-mode line, except for not_bound', async () => {
+  const published = createHarness({ response: { checkRunUrl: RUN_URL }, payload: PR })
+  await run(published.dependencies)
+  assert.equal(published.runtime.infos.filter((line) => line === NO_MODE_LINE).length, 1)
+
+  const neither = createHarness({ payload: PR })
+  await run(neither.dependencies)
+  assert.equal(neither.runtime.infos.filter((line) => line === NO_MODE_LINE).length, 1)
+
+  const notBound = createHarness({ response: { publishError: { code: 'not_bound', message: 'no binding' } }, payload: PR })
+  await run(notBound.dependencies)
+  assert.equal(notBound.runtime.infos.includes(NO_MODE_LINE), false)
+
+  const withMode = createHarness({ response: { mode: 'advisory', checkRunUrl: RUN_URL, conclusion: 'neutral' }, payload: PR })
+  await run(withMode.dependencies)
+  assert.equal(withMode.runtime.infos.includes(NO_MODE_LINE), false)
+})
+
+test('the completion line carries the mode when the response did', async () => {
+  for (const mode of ['advisory', 'blocking'] as const) {
+    const h = createHarness({ response: { mode, checkRunUrl: RUN_URL, annotationCount: 4, conclusion: 'neutral' }, payload: PR })
+    await run(h.dependencies)
+    assert.equal(h.runtime.infos.at(-1), `Draftt scan completed (violations 1, warnings 2, annotations 4); check published by server: ${RUN_URL}${MODE_SUFFIX(mode)}`)
+  }
+  const fallback = createHarness({ response: { mode: 'advisory' }, payload: PR })
+  await run(fallback.dependencies)
+  assert.equal(fallback.runtime.infos.at(-1), `Draftt scan completed (violations 1, warnings 2, annotations 1); check published by action: https://github.com/o/r/runs/9${MODE_SUFFIX('advisory')}`)
+  const old = createHarness({ response: { checkRunUrl: RUN_URL }, payload: PR })
+  await run(old.dependencies)
+  assert.equal(old.runtime.infos.at(-1)?.includes('; mode '), false)
+})
+
+test('a 408 upload_timeout and a 422 too_many_scan_keys reach the run as scan errors with their messages, not retried', async (t) => {
+  const cases = [
+    { status: 408, body: { code: 'upload_timeout', message: 'The upload did not finish within 240 s; send the body gzip-compressed' }, message: 'The upload did not finish within 240 s; send the body gzip-compressed' },
+    { status: 422, body: { code: 'too_many_scan_keys', message: 'This commit already has 50 Draftt scan keys' }, message: 'This commit already has 50 Draftt CI scans, the most Draftt CI accepts per commit (one per terraform-root).' },
+  ]
+  for (const item of cases) {
+    const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(item.status, item.body))
+    const h = createHarness({ payload: PR })
+    h.dependencies.scanTerraformPlan = realScanClient([])
+    await run(h.dependencies)
+    fetchMock.mock.restore()
+    assert.equal(fetchMock.mock.callCount(), 1)
+    assert.ok(h.runtime.warnings.includes(item.message), JSON.stringify(h.runtime.warnings))
+    assert.deepEqual(h.publisher.completed.map((c) => [c.conclusion, c.title]), [['neutral', 'Terraform policy scan could not complete']])
+    assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action' })
   }
 })

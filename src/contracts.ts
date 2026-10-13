@@ -47,7 +47,16 @@ export interface ScanResponse {
   checkRunUrl?: string
   annotationCount?: number
   publishError?: { code: string; message: string }
+  // The Draftt CI mode and the conclusion of the check the server published. Older servers send neither.
+  mode?: ScanMode
+  conclusion?: ServerConclusion
 }
+
+export type ScanMode = 'advisory' | 'blocking'
+export type ServerConclusion = 'success' | 'neutral' | 'failure'
+
+const SCAN_MODES: readonly unknown[] = ['advisory', 'blocking'] satisfies ScanMode[]
+const SERVER_CONCLUSIONS: readonly unknown[] = ['success', 'neutral', 'failure'] satisfies ServerConclusion[]
 
 export function parseScanResponse(value: unknown, options: { serverUrl?: string } = {}): ScanResponse {
   if (!isRecord(value)) invalid('root')
@@ -112,7 +121,17 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
   const publishError = isRecord(value.publishError) && typeof value.publishError.code === 'string' && typeof value.publishError.message === 'string'
     ? { code: value.publishError.code, message: value.publishError.message }
     : undefined
-  return { ...parsed, ...(checkRunUrl ? { checkRunUrl } : {}), ...(annotationCount === undefined ? {} : { annotationCount }), ...(publishError ? { publishError } : {}) }
+  // Only the exact strings count; any other value is treated as absent, never as a malformed response.
+  const mode = SCAN_MODES.includes(value.mode) ? (value.mode as ScanMode) : undefined
+  const conclusion = SERVER_CONCLUSIONS.includes(value.conclusion) ? (value.conclusion as ServerConclusion) : undefined
+  return {
+    ...parsed,
+    ...(checkRunUrl ? { checkRunUrl } : {}),
+    ...(annotationCount === undefined ? {} : { annotationCount }),
+    ...(publishError ? { publishError } : {}),
+    ...(mode ? { mode } : {}),
+    ...(conclusion ? { conclusion } : {}),
+  }
 }
 
 function safeHost(url: string): string | undefined {

@@ -3,7 +3,15 @@ import path from 'node:path'
 import { isRecord } from './objects.ts'
 import type { GitHubScanContext } from './request.ts'
 
-export const MAX_PLAN_BYTES = 50 * 1024 * 1024
+const MiB = 1024 * 1024
+// The raw plan file on disk.
+export const MAX_PLAN_FILE_BYTES = 50 * MiB
+// The scrubbed plan as the service measures it, JSON.stringify(plan).
+export const MAX_PLAN_BYTES = 49 * MiB
+// The whole request body, before gzip.
+export const MAX_REQUEST_BYTES = 50 * MiB
+
+const PLAN_TOO_LARGE = 'The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.'
 
 const SECRET_FIELD_NAMES = new Set([
   'access_key',
@@ -94,7 +102,7 @@ export async function readAndSanitizePlan(planPath: string, workspaceRoot: strin
   }
   const file = await stat(absolutePath)
   if (!file.isFile()) throw new Error('Plan JSON path is not a file')
-  if (file.size > MAX_PLAN_BYTES) throw new Error('Plan JSON exceeds the 50 MiB input limit')
+  if (file.size > MAX_PLAN_FILE_BYTES) throw new Error('Plan JSON exceeds the 50 MiB input limit')
 
   let raw: string
   try {
@@ -217,17 +225,21 @@ export function serializeScanRequest(
   policyIds: string[] | undefined,
   github?: GitHubScanContext,
 ): { body: string; sourceMapDropped: boolean } {
+  // Serialized once: the body below is byte for byte JSON.stringify({ plan, policyIds?, github? }).
+  const planJson = JSON.stringify(plan)
+  if (Buffer.byteLength(planJson) > MAX_PLAN_BYTES) throw new Error(PLAN_TOO_LARGE)
+  const ids = policyIds === undefined ? '' : `,"policyIds":${JSON.stringify(policyIds)}`
   const serialize = (context: GitHubScanContext | undefined): string =>
-    JSON.stringify({ plan, ...(policyIds === undefined ? {} : { policyIds }), ...(context ? { github: context } : {}) })
+    `{"plan":${planJson}${ids}${context ? `,"github":${JSON.stringify(context)}` : ''}}`
   let body = serialize(github)
   let sourceMapDropped = false
   // The source map is optional enrichment: drop it before giving up on an oversized request.
-  if (Buffer.byteLength(body) > MAX_PLAN_BYTES && github?.sourceMap) {
+  if (Buffer.byteLength(body) > MAX_REQUEST_BYTES && github?.sourceMap) {
     const { sourceMap: _dropped, ...withoutMap } = github
     body = serialize(withoutMap)
     sourceMapDropped = true
   }
-  if (Buffer.byteLength(body) > MAX_PLAN_BYTES) throw new Error('Scrubbed scan request exceeds the 50 MiB request limit')
+  if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error('Scrubbed scan request exceeds the 50 MiB request limit')
   return { body, sourceMapDropped }
 }
 

@@ -196,3 +196,61 @@ test('logs the retry wait after a network failure without the error detail', asy
   }
   assert.deepEqual(lines, ['Draftt request failed, retrying in 0.5 s (attempt 2 of 3)'])
 })
+
+test('408 and 422 are not retried and report the service or the Action message', async () => {
+  const cases = [
+    {
+      status: 408,
+      body: { code: 'upload_timeout', message: 'The upload did not finish within 240 s; send the body gzip-compressed' },
+      message: 'The upload did not finish within 240 s; send the body gzip-compressed',
+      code: 'upload_timeout',
+    },
+    {
+      status: 422,
+      body: { code: 'too_many_scan_keys', message: 'This commit already has 50 Draftt scan keys' },
+      message: 'This commit already has 50 Draftt CI scans, the most Draftt CI accepts per commit (one per terraform-root).',
+      code: 'too_many_scan_keys',
+    },
+    { status: 422, body: { code: 'other_rule', message: 'A service sentence' }, message: 'A service sentence', code: 'other_rule' },
+    { status: 408, body: 'Request Timeout', message: 'Draftt scan request failed with HTTP 408', code: undefined },
+    { status: 422, body: { code: 7, message: 3 }, message: 'Draftt scan request failed with HTTP 422', code: undefined },
+  ]
+  const originalFetch = globalThis.fetch
+  try {
+    for (const item of cases) {
+      let calls = 0
+      const sleeps: number[] = []
+      globalThis.fetch = async () => {
+        calls += 1
+        return new Response(typeof item.body === 'string' ? item.body : JSON.stringify(item.body), { status: item.status })
+      }
+      await assert.rejects(
+        () => scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
+        (error: unknown) => {
+          assert.ok(error instanceof ScanRequestFailure)
+          assert.deepEqual({ status: error.status, code: error.code, message: error.message }, { status: item.status, code: item.code, message: item.message })
+          return true
+        },
+      )
+      assert.equal(calls, 1, `HTTP ${item.status} must not be retried`)
+      assert.deepEqual(sleeps, [])
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('a backend message is never passed through for other statuses', async () => {
+  const originalFetch = globalThis.fetch
+  try {
+    for (const status of [400, 404, 409, 413]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({ code: 'x', message: 'planted-backend-body' }), { status })
+      await assert.rejects(
+        () => scanTerraformPlan('https://draftt-ci.draftt.io/v1/scans', 'k', '{}', { sleep: async () => {} }),
+        (error: unknown) => error instanceof Error && !error.message.includes('planted-backend-body'),
+      )
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
