@@ -8,7 +8,7 @@ import type { ActionInputs } from '../src/inputs.ts'
 import { completedConclusion, scanErrorConclusion } from '../src/outcome.ts'
 import type { SanitizedPlan } from '../src/plan.ts'
 import type { GitHubScanContext } from '../src/request.ts'
-import type { ScanReport } from '../src/report.ts'
+import type { ReportOptions, ScanReport } from '../src/report.ts'
 import { run, type ActionDependencies, type ActionRuntime, type CheckPublisherLike } from '../src/run.ts'
 import type { WorkspaceSourceStatus } from '../src/workspace.ts'
 import { scanResponse } from './fixtures.ts'
@@ -110,6 +110,7 @@ interface HarnessOptions {
   apiUrl?: string
   githubToken?: string | null
   payload?: Record<string, unknown>
+  env?: NodeJS.ProcessEnv
   response?: Partial<ScanResponse>
   scanError?: Error
   inputsError?: Error
@@ -122,7 +123,7 @@ function createHarness(options: HarnessOptions = {}): {
   runtime: FakeRuntime
   publisher: FakePublisher
   events: string[]
-  calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: Array<'warning' | 'failure'> }
+  calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: Array<'warning' | 'failure'>; reportOptions: Array<ReportOptions | undefined> }
 } {
   const failOnViolations = options.failOnViolations ?? false
   const failOnScanError = options.failOnScanError ?? false
@@ -133,7 +134,7 @@ function createHarness(options: HarnessOptions = {}): {
   const runtime = new FakeRuntime(runtimeInputs)
   const events: string[] = []
   const publisher = new FakePublisher(events)
-  const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as Array<'warning' | 'failure'> }
+  const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as Array<'warning' | 'failure'>, reportOptions: [] as Array<ReportOptions | undefined> }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
     apiUrl,
@@ -214,14 +215,15 @@ function createHarness(options: HarnessOptions = {}): {
         }
       },
       eventPayload: () => options.payload ?? {},
-      env: () => ({}),
+      env: () => options.env ?? {},
       scanTerraformPlan: async () => {
         calls.scan += 1
         if (options.scanError) throw options.scanError
         return { ...response, ...options.response }
       },
-      buildScanReport: async (_response, _locator, level) => {
+      buildScanReport: async (_response, _locator, level, _noPoliciesSelected, reportOptions) => {
         calls.levels.push(level)
+        calls.reportOptions.push(reportOptions)
         return report
       },
       completedConclusion,
@@ -918,4 +920,34 @@ test('a 408 upload_timeout and a 422 too_many_scan_keys reach the run as scan er
     assert.deepEqual(h.publisher.completed.map((c) => [c.conclusion, c.title]), [['neutral', 'Terraform policy scan could not complete']])
     assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action' })
   }
+})
+
+const HEAD_SHA = '1111111111111111111111111111111111111111'
+const REPOSITORY = { owner: { login: 'draftt-io' }, name: 'infra' }
+
+test('action mode links path:line to the head commit of the payload repository', async () => {
+  const h = createHarness({ publishMode: 'action', payload: { ...PR, repository: REPOSITORY } })
+  await run(h.dependencies)
+  assert.deepEqual(h.calls.reportOptions, [{ repository: { owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA } }])
+})
+
+test('a push event in action mode still links files, from GITHUB_REPOSITORY', async () => {
+  const h = createHarness({ payload: { ref: 'refs/heads/main' }, env: { GITHUB_REPOSITORY: 'draftt-io/infra' } })
+  await run(h.dependencies)
+  assert.deepEqual(h.publisher.names, [CHECK_NAME])
+  assert.deepEqual(h.calls.reportOptions, [{ repository: { owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA } }])
+})
+
+test('the server flow report, and so the fallback check, links files too', async () => {
+  const h = createHarness({ payload: { ...PR, repository: REPOSITORY } })
+  await run(h.dependencies)
+  assert.deepEqual(h.publisher.names, [FALLBACK_CHECK_NAME])
+  assert.equal(h.publisher.completed.length, 1)
+  assert.deepEqual(h.calls.reportOptions, [{ repository: { owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA } }])
+})
+
+test('without a repository the report gets no file links', async () => {
+  const h = createHarness({ publishMode: 'action', payload: PR })
+  await run(h.dependencies)
+  assert.deepEqual(h.calls.reportOptions, [{}])
 })

@@ -4,8 +4,8 @@ import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckConclu
 import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
 import { fallbackConclusion, serverJobConclusion } from './outcome.ts'
 import type { SanitizedPlan } from './plan.ts'
-import type { ScanReport, SourceLocator } from './report.ts'
-import type { GitHubScanContext, SourceMapEntry } from './request.ts'
+import type { ReportOptions, ReportRepository, ScanReport, SourceLocator } from './report.ts'
+import { repositoryFromPayload, type GitHubScanContext, type SourceMapEntry } from './request.ts'
 import { MAX_SOURCE_MAP_ENTRIES } from './source-map.ts'
 import type { WorkspaceSourceStatus } from './workspace.ts'
 
@@ -67,6 +67,7 @@ export interface ActionDependencies {
     locator: SourceLocator | undefined,
     annotationLevel: 'warning' | 'failure',
     noPoliciesSelected: boolean,
+    options?: ReportOptions,
   ): Promise<ScanReport>
   completedConclusion(violationCount: number, failOnViolations: boolean): CheckConclusion
   scanErrorConclusion(failOnScanError: boolean): CheckConclusion
@@ -134,6 +135,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
       locator,
       inputs.failOnViolations ? 'failure' : 'warning',
       inputs.policyIds?.length === 0,
+      reportOptions(repositoryFromPayload({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha })),
     )
     violationCount = report.violationCount
     warningCount = report.warningCount
@@ -217,8 +219,9 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       if (built.capped) runtime.warning(`The source map was capped at ${MAX_SOURCE_MAP_ENTRIES} resources; findings for the rest will remain in the Check summary.`)
     }
     const env = dependencies.env()
+    const payload = dependencies.eventPayload()
     const github = dependencies.buildGitHubContext({
-      payload: dependencies.eventPayload(),
+      payload,
       env,
       headSha,
       failOnViolations: inputs.failOnViolations,
@@ -241,6 +244,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       locator,
       mode === 'blocking' ? 'failure' : 'warning',
       inputs.policyIds?.length === 0,
+      reportOptions(repositoryFromPayload({ payload, env, headSha })),
     )
     violationCount = report.violationCount
     warningCount = report.warningCount
@@ -296,6 +300,11 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
     if (failOnScanError) runtime.setFailed(message)
     else runtime.warning(message)
   }
+}
+
+// Without a repository the renderer prints path:line unlinked.
+function reportOptions(repository: ReportRepository | undefined): ReportOptions {
+  return repository ? { repository } : {}
 }
 
 async function sourceLocatorFor(

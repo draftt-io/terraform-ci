@@ -76,7 +76,7 @@ Then the Draftt CI App owns the check and the PR comment, and the Action creates
 - Current limitation: when a pull request is opened, reopened or pushed, the App's webhook queues a check and a waiting comment for the root key `.` only. If no upload arrives for that key, the check concludes neutral after the timeout a Draftt Admin sets in the Draftt console (10 minutes by default). A workflow whose `terraform-root` is not the repository root therefore also sees an extra `Draftt Terraform Policy Scan` check that ends neutral with "Root module plan not received", plus its comment.
 - On `pull_request_target` the planned code runs with access to the Draftt key; prefer `pull_request`.
 
-Every other case — `publish-mode: action`, the default ui-backend `api-url`, and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated. Only its report layout (below), the new outputs, the `github-token` default (`${{ github.token }}`) and the nested-workspace annotation check change: when `GITHUB_WORKSPACE` is not the repository root, annotations are skipped with a warning.
+Every other case — `publish-mode: action`, the default ui-backend `api-url`, and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated. Only its report layout (below), the new outputs, the `github-token` default (`${{ github.token }}`) and the nested-workspace annotation check change: when `GITHUB_WORKSPACE` is not the repository root, annotations are skipped with a warning. In both publish modes the report links each `path:line` to the changed file at the scanned commit.
 
 Requests to `/v1/scans` over 1 MiB are gzip-compressed. A `429` response waits for `Retry-After` (at most 60 s) before retrying. A `408 upload_timeout` (the upload did not finish within the service's 240 s) and a `422 too_many_scan_keys` are not retried; the Action reports their message as the scan error.
 
@@ -84,7 +84,7 @@ Requests to `/v1/scans` over 1 MiB are gzip-compressed. A `429` response waits f
 
 The check summary, and the PR comment the App posts, lead with counts by status and the earliest due date, then a table of resource, status, policy and change needed (`from → to by <date>`) with one row per policy hit. Collapsed sections follow for resources past the first 25 and for checks that could not run, then a footer with coverage counts.
 
-Annotations on the changed lines are plain text and at most 500, most urgent first. In `server` mode each table row links to the file and line at the scanned commit; the Action's own check shows `path:line` without a link.
+Annotations on the changed lines are plain text and at most 500, most urgent first. Each table row links to the file and line at the scanned commit, in the App's check and in the Action's own check.
 
 ## Upgrading from v0.1.x
 

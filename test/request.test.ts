@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildGitHubContext } from '../src/request.ts'
+import { buildGitHubContext, repositoryFromPayload } from '../src/request.ts'
 
 const SHA = 'a'.repeat(40)
 const env = { GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2', GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'draftt-io/infra' }
@@ -55,4 +55,22 @@ test('omits workflowRunUrl unless it is https', () => {
   assert.ok(block)
   assert.equal('workflowRunUrl' in block, false)
   assert.equal(block.runId, 42)
+})
+
+test('repositoryFromPayload reads owner and name from the payload repository', () => {
+  const payload = { repository: { name: 'infra', owner: { login: 'draftt-io' } } }
+  assert.deepEqual(repositoryFromPayload({ payload, env: { GITHUB_REPOSITORY: 'other/repo' }, headSha: SHA }), { owner: 'draftt-io', repo: 'infra', headSha: SHA })
+})
+
+test('repositoryFromPayload falls back to GITHUB_REPOSITORY split on the first slash', () => {
+  assert.deepEqual(repositoryFromPayload({ payload: {}, env: { GITHUB_REPOSITORY: 'draftt-io/infra' }, headSha: SHA }), { owner: 'draftt-io', repo: 'infra', headSha: SHA })
+  assert.deepEqual(repositoryFromPayload({ payload: { repository: { name: 'infra' } }, env: { GITHUB_REPOSITORY: 'draftt-io/infra' }, headSha: SHA }), { owner: 'draftt-io', repo: 'infra', headSha: SHA })
+})
+
+test('repositoryFromPayload is undefined without an owner, a repo or a head SHA', () => {
+  for (const GITHUB_REPOSITORY of [undefined, '', 'draftt-io', '/infra', 'draftt-io/']) {
+    assert.equal(repositoryFromPayload({ payload: {}, env: { GITHUB_REPOSITORY }, headSha: SHA }), undefined, String(GITHUB_REPOSITORY))
+  }
+  assert.equal(repositoryFromPayload({ payload: { repository: { name: '', owner: { login: '' } } }, env: {}, headSha: SHA }), undefined)
+  assert.equal(repositoryFromPayload({ payload: { repository: { name: 'infra', owner: { login: 'draftt-io' } } }, env: {}, headSha: '' }), undefined)
 })
