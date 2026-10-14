@@ -1,12 +1,20 @@
+import path from 'node:path'
+
+export type PublishMode = 'server' | 'action'
+
 export interface ActionInputs {
   planJson: string
   apiUrl: string
   apiKey: string
-  githubToken: string
+  githubToken?: string
   terraformRoot: string
   policyIds?: string[]
+  // Deprecated and a no-op in every flow; still sent in the github block, which the server ignores.
   failOnViolations: boolean
+  // As given: '' when unset; the deprecation warning prints only for 'true'.
+  failOnViolationsRaw: '' | 'true' | 'false'
   failOnScanError: boolean
+  publishMode: PublishMode
 }
 
 export interface InputReader {
@@ -15,16 +23,49 @@ export interface InputReader {
 
 export function readInputs(core: InputReader): ActionInputs {
   const policyIds = parsePolicyIds(core.getInput('policy-ids'))
+  const githubToken = core.getInput('github-token')
+  const failOnViolationsRaw = parseOptionalBoolean(core.getInput('fail-on-violations'), 'fail-on-violations')
   return {
     planJson: core.getInput('plan-json', { required: true }),
     apiUrl: core.getInput('api-url', { required: true }),
     apiKey: core.getInput('api-key', { required: true }),
-    githubToken: core.getInput('github-token', { required: true }),
+    ...(githubToken === '' ? {} : { githubToken }),
     terraformRoot: core.getInput('terraform-root', { required: true }),
     ...(policyIds === undefined ? {} : { policyIds }),
-    failOnViolations: parseBoolean(core.getInput('fail-on-violations'), 'fail-on-violations'),
+    failOnViolations: failOnViolationsRaw === 'true',
+    failOnViolationsRaw,
     failOnScanError: parseBoolean(core.getInput('fail-on-scan-error'), 'fail-on-scan-error'),
+    publishMode: parsePublishMode(core.getInput('publish-mode')),
   }
+}
+
+function parsePublishMode(value: string): PublishMode {
+  if (value === '' || value === 'server') return 'server'
+  if (value === 'action') return 'action'
+  throw new Error('publish-mode must be "server" or "action"')
+}
+
+const SCAN_KEY = /^[A-Za-z0-9._/-]{1,200}$/
+
+// terraform-root as the server's scan key: one check and one comment per root module.
+// Equivalent spellings map to one key ('./modules//eks/' -> 'modules/eks', './' -> '.'). An absolute
+// root (e.g. ${{ github.workspace }}, which v0.1.1 accepts) is made relative to `workspace`
+// (pass GITHUB_WORKSPACE); an absolute root outside it, or with no workspace given, is rejected.
+export function scanKeyFromTerraformRoot(terraformRoot: string, workspace?: string): string {
+  const relative = terraformRoot.startsWith('/') ? relativeToWorkspace(terraformRoot, workspace) : terraformRoot
+  const normalized = path.posix.normalize(relative === '' ? '.' : relative).replace(/\/+$/, '')
+  const key = normalized === '' ? '.' : normalized
+  if (!SCAN_KEY.test(key) || key.startsWith('/') || key.split('/').includes('..')) throw new Error(RELATIVE_ROOT_ERROR)
+  return key
+}
+
+const RELATIVE_ROOT_ERROR = 'terraform-root must be a relative path without ".." segments'
+
+function relativeToWorkspace(absoluteRoot: string, workspace: string | undefined): string {
+  if (!workspace || !workspace.startsWith('/')) throw new Error(RELATIVE_ROOT_ERROR)
+  const relative = path.posix.relative(path.posix.normalize(workspace), path.posix.normalize(absoluteRoot))
+  if (relative === '..' || relative.startsWith('../') || relative.startsWith('/')) throw new Error(RELATIVE_ROOT_ERROR)
+  return relative === '' ? '.' : relative
 }
 
 export function parsePolicyIds(value: string): string[] | undefined {
@@ -39,6 +80,12 @@ export function parsePolicyIds(value: string): string[] | undefined {
     throw new Error('policy-ids must be a JSON array of decimal-string ids')
   }
   return parsed
+}
+
+// action.yml gives fail-on-violations no default, so '' is a valid, unset value (false).
+function parseOptionalBoolean(value: string, name: string): '' | 'true' | 'false' {
+  if (value === '' || value === 'true' || value === 'false') return value
+  throw new Error(`${name} must be true or false`)
 }
 
 function parseBoolean(value: string, name: string): boolean {

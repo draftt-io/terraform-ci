@@ -1,11 +1,28 @@
+import { isScansEndpoint } from './api.ts'
 import type { ScanResponse } from './contracts.ts'
-import type { CheckAnnotation, CheckConclusion } from './github-check.ts'
-import type { ActionInputs, InputReader } from './inputs.ts'
+import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckConclusion } from './github-check.ts'
+import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
+import { fallbackConclusion } from './outcome.ts'
 import type { SanitizedPlan } from './plan.ts'
-import type { ScanReport, SourceLocator } from './report.ts'
+import type { ReportOptions, ReportRepository, ScanReport, SourceLocator } from './report.ts'
+import { repositoryFromPayload, type GitHubScanContext, type SourceMapEntry } from './request.ts'
+import { MAX_SOURCE_MAP_ENTRIES } from './source-map.ts'
 import type { WorkspaceSourceStatus } from './workspace.ts'
 
 type ScanStatus = 'completed' | 'skipped' | 'error'
+type Publisher = 'server' | 'action' | 'none'
+
+interface Outputs {
+  status: ScanStatus
+  violations: number
+  warnings: number
+  annotations: number
+  checkRunUrl: string
+  publisher: Publisher
+}
+
+const ERROR_TITLE = 'Terraform policy scan could not complete'
+const DEPRECATION = 'fail-on-violations is ignored: Draftt CI checks never fail; violations are reported in the check and PR comment.'
 
 export interface ActionRuntime extends InputReader {
   setSecret(value: string): void
@@ -18,42 +35,74 @@ export interface ActionRuntime extends InputReader {
 
 export interface CheckPublisherLike {
   readonly annotationCount: number
+  readonly checkRunUrl: string | undefined
   start(): Promise<void>
   publishAnnotations(annotations: CheckAnnotation[]): Promise<void>
   finish(conclusion: CheckConclusion, title: string, summary: string): Promise<void>
+  publishCompleted(conclusion: CheckConclusion, title: string, summary: string, annotations: CheckAnnotation[]): Promise<void>
 }
 
 export interface ActionDependencies {
   runtime: ActionRuntime
   isExternalFork(): boolean
   getHeadSha(): string
-  createPublisher(token: string, headSha?: string): CheckPublisherLike
+  createPublisher(token: string, headSha?: string, name?: string): CheckPublisherLike
   readInputs(runtime: InputReader): ActionInputs
   readAndSanitizePlan(planPath: string, workspaceRoot: string): Promise<SanitizedPlan>
-  serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined): string
+  serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined, github?: GitHubScanContext): { body: string; sourceMapDropped: boolean }
   inspectWorkspaceForSourceMapping(workspaceRoot: string, expectedSha: string): Promise<WorkspaceSourceStatus>
   createSourceLocator(workspaceRoot: string, terraformRoot: string): Promise<SourceLocator>
+  buildSourceMap(plan: SanitizedPlan, locator: SourceLocator): Promise<{ sourceMap: Record<string, SourceMapEntry>; capped: boolean }>
+  buildGitHubContext(input: { payload: Record<string, unknown>; env: NodeJS.ProcessEnv; headSha: string; failOnViolations: boolean; scanKey: string; sourceMap?: Record<string, SourceMapEntry> }): GitHubScanContext | undefined
+  eventPayload(): Record<string, unknown>
+  env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
+  // The shared renderer still takes a level; every flow passes 'warning'.
   buildScanReport(
     response: ScanResponse,
     locator: SourceLocator | undefined,
     annotationLevel: 'warning' | 'failure',
     noPoliciesSelected: boolean,
+    options?: ReportOptions,
   ): Promise<ScanReport>
-  completedConclusion(violationCount: number, failOnViolations: boolean): CheckConclusion
+  completedConclusion(violationCount: number): CheckConclusion
   scanErrorConclusion(failOnScanError: boolean): CheckConclusion
   workspaceRoot(): string
 }
 
 export async function run(dependencies: ActionDependencies): Promise<void> {
-  const { runtime } = dependencies
-  setOutputs(runtime, 'error', 0, 0, 0)
+  setOutputs(dependencies.runtime, { status: 'error', violations: 0, warnings: 0, annotations: 0, checkRunUrl: '', publisher: 'none' })
 
   if (dependencies.isExternalFork()) {
     await skipExternalFork(dependencies)
     return
   }
+  if (usesServerFlow(dependencies)) await runServerFlow(dependencies)
+  else await runActionFlow(dependencies)
+}
 
+// Server publishing needs a /v1/scans api-url and a PR event. Everything else (action mode, the
+// default /ci/scanTerraformPlan api-url, push, merge_group, workflow_dispatch) is the v0.1.1 flow under the v0.1.1
+// check name, so branch protection pinned to that check keeps working after an upgrade. Decided
+// from the raw inputs, before readInputs, so the v0.1.1 flow still starts its check first.
+function usesServerFlow(dependencies: ActionDependencies): boolean {
+  const { runtime } = dependencies
+  if (runtime.getInput('publish-mode') === 'action') return false
+  if (!isScansEndpoint(runtime.getInput('api-url'))) return false
+  let headSha: string
+  try {
+    headSha = dependencies.getHeadSha()
+  } catch {
+    return false
+  }
+  const probe = dependencies.buildGitHubContext({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha, failOnViolations: false, scanKey: '.' })
+  return probe !== undefined
+}
+
+// v0.1.1, apart from the check-run-url and publisher outputs and fail-on-violations, which no
+// longer fails the check or the job.
+async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
+  const { runtime } = dependencies
   const apiKey = runtime.getInput('api-key')
   if (apiKey) runtime.setSecret(apiKey)
   let failOnScanError = runtime.getInput('fail-on-scan-error') === 'true'
@@ -65,71 +114,229 @@ export async function run(dependencies: ActionDependencies): Promise<void> {
     const githubToken = runtime.getInput('github-token', { required: true })
     runtime.setSecret(githubToken)
     const headSha = dependencies.getHeadSha()
-    publisher = dependencies.createPublisher(githubToken, headSha)
+    publisher = dependencies.createPublisher(githubToken, headSha, CHECK_NAME)
     await publisher.start()
 
     const inputs = dependencies.readInputs(runtime)
     failOnScanError = inputs.failOnScanError
+    warnDeprecatedInput(runtime, inputs.failOnViolationsRaw)
+    runtime.info(`Draftt scan: publish-mode action, endpoint ${endpointHost(inputs.apiUrl)}`)
 
     const workspaceRoot = dependencies.workspaceRoot()
     const plan = await dependencies.readAndSanitizePlan(inputs.planJson, workspaceRoot)
-    const body = dependencies.serializeScanRequest(plan, inputs.policyIds)
-
-    let locator: SourceLocator | undefined
-    const workspaceStatus = await dependencies.inspectWorkspaceForSourceMapping(workspaceRoot, headSha)
-    if (workspaceStatus === 'matched') {
-      try {
-        locator = await dependencies.createSourceLocator(workspaceRoot, inputs.terraformRoot)
-      } catch {
-        runtime.warning('Terraform source mapping is unavailable; findings will remain in the Check summary.')
-      }
-    } else {
-      runtime.warning(sourceMappingWarning(workspaceStatus))
-    }
+    const { body } = dependencies.serializeScanRequest(plan, inputs.policyIds)
+    const locator = await sourceLocatorFor(dependencies, workspaceRoot, headSha, inputs.terraformRoot)
 
     const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
     const report = await dependencies.buildScanReport(
       response,
       locator,
-      inputs.failOnViolations ? 'failure' : 'warning',
+      'warning',
       inputs.policyIds?.length === 0,
+      reportOptions(repositoryFromPayload({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha })),
     )
     violationCount = report.violationCount
     warningCount = report.warningCount
 
     await publisher.publishAnnotations(report.annotations)
-    const shouldFail = report.violationCount > 0 && inputs.failOnViolations
-    const conclusion = dependencies.completedConclusion(report.violationCount, inputs.failOnViolations)
+    const conclusion = dependencies.completedConclusion(report.violationCount)
     await publisher.finish(conclusion, report.title, report.summary)
     await writeWorkflowSummary(runtime, report.summary)
-    setOutputs(runtime, 'completed', report.violationCount, report.warningCount, publisher.annotationCount)
-
-    if (shouldFail) runtime.setFailed(`Draftt found policy violations in ${report.violationCount} Terraform resources.`)
+    const outputs: Outputs = {
+      status: 'completed',
+      violations: report.violationCount,
+      warnings: report.warningCount,
+      annotations: publisher.annotationCount,
+      checkRunUrl: publisher.checkRunUrl ?? '',
+      publisher: 'action',
+    }
+    setOutputs(runtime, outputs)
+    logCompletion(runtime, outputs)
   } catch (error) {
     const message = safeErrorMessage(error)
-    const annotationCount = publisher?.annotationCount ?? 0
-    setOutputs(runtime, 'error', violationCount, warningCount, annotationCount)
+    let concluded = false
     if (publisher) {
       try {
-        await publisher.finish(
-          dependencies.scanErrorConclusion(failOnScanError),
-          'Terraform policy scan could not complete',
-          `Draftt could not produce a reliable policy result.\n\n${message}`,
-        )
+        await publisher.finish(dependencies.scanErrorConclusion(failOnScanError), ERROR_TITLE, errorSummary(message))
+        concluded = true
+        runtime.info(`Posted the error check: ${publisher.checkRunUrl ?? ''}`)
       } catch {
         runtime.warning('The Draftt GitHub Check could not be finalized.')
       }
     }
+    setOutputs(runtime, {
+      status: 'error',
+      violations: violationCount,
+      warnings: warningCount,
+      annotations: publisher?.annotationCount ?? 0,
+      checkRunUrl: concluded ? (publisher?.checkRunUrl ?? '') : '',
+      publisher: concluded ? 'action' : 'none',
+    })
     await writeWorkflowSummary(runtime, `## Draftt Terraform Policy Scan\n\nScan error: ${message}`)
     if (failOnScanError) runtime.setFailed(message)
     else runtime.warning(message)
   }
 }
 
+// publish-mode server on a PR event against /v1/scans: the Draftt CI App publishes. This Action
+// creates no check before or during the request, and posts one completed (Action) check only when
+// the server did not publish, or when the request itself failed.
+async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
+  const { runtime } = dependencies
+  const apiKey = runtime.getInput('api-key')
+  if (apiKey) runtime.setSecret(apiKey)
+  const githubToken = runtime.getInput('github-token') || undefined
+  if (githubToken) runtime.setSecret(githubToken)
+  let failOnScanError = runtime.getInput('fail-on-scan-error') === 'true'
+  const headSha = dependencies.getHeadSha()
+  let violationCount = 0
+  let warningCount = 0
+
+  try {
+    const inputs = dependencies.readInputs(runtime)
+    failOnScanError = inputs.failOnScanError
+    warnDeprecatedInput(runtime, inputs.failOnViolationsRaw)
+
+    const workspaceRoot = dependencies.workspaceRoot()
+    // An absolute terraform-root (e.g. ${{ github.workspace }}) is keyed relative to the same
+    // workspace root the plan and source locator use (GITHUB_WORKSPACE, via workspaceRoot()).
+    const scanKey = scanKeyFromTerraformRoot(inputs.terraformRoot, workspaceRoot)
+    runtime.info(`Draftt scan: publish-mode server, endpoint ${endpointHost(inputs.apiUrl)}, scan key ${scanKey}`)
+    const plan = await dependencies.readAndSanitizePlan(inputs.planJson, workspaceRoot)
+    const locator = await sourceLocatorFor(dependencies, workspaceRoot, headSha, inputs.terraformRoot)
+
+    let sourceMap: Record<string, SourceMapEntry> | undefined
+    if (locator) {
+      const built = await dependencies.buildSourceMap(plan, locator)
+      sourceMap = built.sourceMap
+      if (built.capped) runtime.warning(`The source map was capped at ${MAX_SOURCE_MAP_ENTRIES} resources; findings for the rest will remain in the Check summary.`)
+    }
+    const env = dependencies.env()
+    const payload = dependencies.eventPayload()
+    const github = dependencies.buildGitHubContext({
+      payload,
+      env,
+      headSha,
+      failOnViolations: inputs.failOnViolations,
+      scanKey,
+      ...(sourceMap ? { sourceMap } : {}),
+    })
+    if (env.GITHUB_EVENT_NAME === 'pull_request_target') {
+      runtime.info('publish-mode: server on pull_request_target exposes the Draftt key to the planned code; prefer pull_request.')
+    }
+    const { body, sourceMapDropped } = dependencies.serializeScanRequest(plan, inputs.policyIds, github)
+    if (sourceMapDropped) runtime.warning('The source map was dropped to keep the upload under 50 MiB; findings will remain in the Check summary.')
+
+    // The response's mode and conclusion, which older servers still send, are ignored.
+    const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
+    const report = await dependencies.buildScanReport(
+      response,
+      locator,
+      'warning',
+      inputs.policyIds?.length === 0,
+      reportOptions(repositoryFromPayload({ payload, env, headSha })),
+    )
+    violationCount = report.violationCount
+    warningCount = report.warningCount
+
+    let outputs: Outputs = { status: 'completed', violations: report.violationCount, warnings: report.warningCount, annotations: 0, checkRunUrl: '', publisher: 'none' }
+    if (response.checkRunUrl) {
+      if (response.publishError) runtime.warning(`Draftt CI published the check but could not finish (${response.publishError.code}): ${response.publishError.message}`)
+      outputs = { ...outputs, annotations: response.annotationCount ?? 0, checkRunUrl: response.checkRunUrl, publisher: 'server' }
+    } else {
+      if (response.publishError) runtime.warning(`Draftt CI could not publish the check (${response.publishError.code}): ${response.publishError.message}`)
+      if (inputs.githubToken) {
+        try {
+          const fallback = dependencies.createPublisher(inputs.githubToken, headSha, FALLBACK_CHECK_NAME)
+          await fallback.publishCompleted(fallbackConclusion(report.violationCount), report.title, report.summary, report.annotations)
+          outputs = { ...outputs, annotations: fallback.annotationCount, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
+          runtime.info(`Posted the fallback check: ${outputs.checkRunUrl}`)
+        } catch {
+          runtime.warning('The Draftt fallback check could not be published.')
+        }
+      } else if (!response.publishError) {
+        runtime.warning('No check was published: Draftt CI reported neither a published check nor a publish error, and no github-token is available for a fallback check.')
+      }
+    }
+
+    await writeWorkflowSummary(runtime, report.summary)
+    setOutputs(runtime, outputs)
+    logCompletion(runtime, outputs)
+  } catch (error) {
+    const message = safeErrorMessage(error)
+    let outputs: Outputs = { status: 'error', violations: violationCount, warnings: warningCount, annotations: 0, checkRunUrl: '', publisher: 'none' }
+    if (githubToken) {
+      try {
+        const fallback = dependencies.createPublisher(githubToken, headSha, FALLBACK_CHECK_NAME)
+        await fallback.publishCompleted(dependencies.scanErrorConclusion(failOnScanError), ERROR_TITLE, errorSummary(message), [])
+        outputs = { ...outputs, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
+        runtime.info(`Posted the error check: ${outputs.checkRunUrl}`)
+      } catch {
+        runtime.warning('The Draftt error check could not be published.')
+      }
+    }
+    setOutputs(runtime, outputs)
+    await writeWorkflowSummary(runtime, `## Draftt Terraform Policy Scan\n\nScan error: ${message}`)
+    if (failOnScanError) runtime.setFailed(message)
+    else runtime.warning(message)
+  }
+}
+
+// Without a repository the renderer prints path:line unlinked.
+function reportOptions(repository: ReportRepository | undefined): ReportOptions {
+  return repository ? { repository } : {}
+}
+
+async function sourceLocatorFor(
+  dependencies: ActionDependencies,
+  workspaceRoot: string,
+  headSha: string,
+  terraformRoot: string,
+): Promise<SourceLocator | undefined> {
+  const workspaceStatus = await dependencies.inspectWorkspaceForSourceMapping(workspaceRoot, headSha)
+  if (workspaceStatus !== 'matched') {
+    dependencies.runtime.warning(sourceMappingWarning(workspaceStatus))
+    return undefined
+  }
+  try {
+    return await dependencies.createSourceLocator(workspaceRoot, terraformRoot)
+  } catch {
+    dependencies.runtime.warning('Terraform source mapping is unavailable; findings will remain in the Check summary.')
+    return undefined
+  }
+}
+
+// Only the host: a path or query string could carry a tenant value or a credential.
+function endpointHost(apiUrl: string): string {
+  try {
+    return new URL(apiUrl).host
+  } catch {
+    return '(invalid api-url)'
+  }
+}
+
+function logCompletion(runtime: ActionRuntime, outputs: Outputs): void {
+  const counts = `violations ${outputs.violations}, warnings ${outputs.warnings}, annotations ${outputs.annotations}`
+  const check = outputs.publisher === 'none' ? 'no check was published' : `check published by ${outputs.publisher}: ${outputs.checkRunUrl}`
+  runtime.info(`Draftt scan completed (${counts}); ${check}`)
+}
+
+// fail-on-violations is a no-op in every flow. Printed once per run, right after the inputs are
+// read, and only when the input is true: false or unset changes nothing, so it says nothing.
+function warnDeprecatedInput(runtime: ActionRuntime, raw: ActionInputs['failOnViolationsRaw']): void {
+  if (raw === 'true') runtime.warning(DEPRECATION)
+}
+
+function errorSummary(message: string): string {
+  return `Draftt could not produce a reliable policy result.\n\n${message}`
+}
+
 function sourceMappingWarning(status: Exclude<WorkspaceSourceStatus, 'matched'>): string {
   switch (status) {
     case 'head_mismatch':
       return 'The pull request head commit is not checked out. Configure actions/checkout with ref: ${{ github.event.pull_request.head.sha }}; findings will remain in the Check summary.'
+    case 'nested_workspace':
+      return 'GITHUB_WORKSPACE is not the repository root; findings will remain in the Check summary.'
     case 'dirty_terraform':
       return 'Terraform source files differ from the checked-out commit; findings will remain in the Check summary.'
     case 'git_unavailable':
@@ -151,7 +358,7 @@ async function skipExternalFork(dependencies: ActionDependencies): Promise<void>
     }
   }
   await writeWorkflowSummary(runtime, `## Draftt Terraform Policy Scan\n\n${summary}`)
-  setOutputs(runtime, 'skipped', 0, 0, 0)
+  setOutputs(runtime, { status: 'skipped', violations: 0, warnings: 0, annotations: 0, checkRunUrl: '', publisher: 'none' })
 }
 
 async function writeWorkflowSummary(runtime: ActionRuntime, markdown: string): Promise<void> {
@@ -162,17 +369,13 @@ async function writeWorkflowSummary(runtime: ActionRuntime, markdown: string): P
   }
 }
 
-function setOutputs(
-  runtime: ActionRuntime,
-  status: ScanStatus,
-  violations: number,
-  warnings: number,
-  annotations: number,
-): void {
-  runtime.setOutput('scan-status', status)
-  runtime.setOutput('violation-count', violations)
-  runtime.setOutput('warning-count', warnings)
-  runtime.setOutput('annotation-count', annotations)
+function setOutputs(runtime: ActionRuntime, outputs: Outputs): void {
+  runtime.setOutput('scan-status', outputs.status)
+  runtime.setOutput('violation-count', outputs.violations)
+  runtime.setOutput('warning-count', outputs.warnings)
+  runtime.setOutput('annotation-count', outputs.annotations)
+  runtime.setOutput('check-run-url', outputs.checkRunUrl)
+  runtime.setOutput('publisher', outputs.publisher)
 }
 
 function safeErrorMessage(error: unknown): string {
