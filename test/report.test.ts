@@ -207,3 +207,8 @@ test('matches every case of the parity fixture shared with draftt-ci', async () 
     assert.deepEqual({ title: report.title, summary: report.summary, annotations: report.annotations }, entry.expected, entry.name)
   }
 })
+
+test('parity pin equals e36bf9a3…948e', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/parity.json', import.meta.url), 'utf8')) as { sharedBlockSha256: string }
+  assert.equal(fixture.sharedBlockSha256, 'e36bf9a38decba0d720f3668ad79c31b6154fea8dfabb31f176db519ebba948e')
+})

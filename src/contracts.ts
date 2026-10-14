@@ -50,7 +50,7 @@ export interface ScanResponse {
   checkRunUrl?: string
   annotationCount?: number
   publishError?: { code: string; message: string }
-  // The Draftt CI mode and the conclusion of the check the server published. Older servers send neither.
+  // Parsed for compatibility only: earlier servers send mode and conclusion, the current one at most conclusion. Nothing reads them.
   mode?: ScanMode
   conclusion?: ServerConclusion
 }

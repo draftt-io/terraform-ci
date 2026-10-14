@@ -1,8 +1,8 @@
 import { isScansEndpoint } from './api.ts'
-import type { ScanMode, ScanResponse } from './contracts.ts'
+import type { ScanResponse } from './contracts.ts'
 import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckConclusion } from './github-check.ts'
 import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
-import { fallbackConclusion, serverJobConclusion } from './outcome.ts'
+import { fallbackConclusion } from './outcome.ts'
 import type { SanitizedPlan } from './plan.ts'
 import type { ReportOptions, ReportRepository, ScanReport, SourceLocator } from './report.ts'
 import { repositoryFromPayload, type GitHubScanContext, type SourceMapEntry } from './request.ts'
@@ -22,12 +22,7 @@ interface Outputs {
 }
 
 const ERROR_TITLE = 'Terraform policy scan could not complete'
-const ROOT_SCAN_KEY = '.'
-const NO_MODE = 'Draftt CI did not report a mode; update the Draftt CI service.'
-const ADVISORY_DEPRECATION = 'fail-on-violations is ignored: Draftt CI is in advisory mode for this repository, so this check does not fail. A Draftt Admin can switch to blocking mode in the Draftt console.'
-const DEPRECATION = 'fail-on-violations is ignored when Draftt CI publishes the check; a Draftt Admin sets the mode in the Draftt console (Integrations › Draftt CI).'
-const PUBLISH_FAILURE = 'Draftt CI could not publish its check, so the required Draftt check will pass when it times out.'
-const PUBLISH_FAILURE_FALLBACK = ` The "${FALLBACK_CHECK_NAME}" check shows the result.`
+const DEPRECATION = 'fail-on-violations is ignored: Draftt CI checks never fail; violations are reported in the check and PR comment.'
 
 export interface ActionRuntime extends InputReader {
   setSecret(value: string): void
@@ -62,6 +57,7 @@ export interface ActionDependencies {
   eventPayload(): Record<string, unknown>
   env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
+  // The shared renderer still takes a level; every flow passes 'warning'.
   buildScanReport(
     response: ScanResponse,
     locator: SourceLocator | undefined,
@@ -69,7 +65,7 @@ export interface ActionDependencies {
     noPoliciesSelected: boolean,
     options?: ReportOptions,
   ): Promise<ScanReport>
-  completedConclusion(violationCount: number, failOnViolations: boolean): CheckConclusion
+  completedConclusion(violationCount: number): CheckConclusion
   scanErrorConclusion(failOnScanError: boolean): CheckConclusion
   workspaceRoot(): string
 }
@@ -85,8 +81,8 @@ export async function run(dependencies: ActionDependencies): Promise<void> {
   else await runActionFlow(dependencies)
 }
 
-// Server publishing needs the draftt-ci route and a PR event. Everything else (action mode, the
-// ui-backend api-url, push, merge_group, workflow_dispatch) is the v0.1.1 flow under the v0.1.1
+// Server publishing needs a /v1/scans api-url and a PR event. Everything else (action mode, the
+// default /ci/scanTerraformPlan api-url, push, merge_group, workflow_dispatch) is the v0.1.1 flow under the v0.1.1
 // check name, so branch protection pinned to that check keeps working after an upgrade. Decided
 // from the raw inputs, before readInputs, so the v0.1.1 flow still starts its check first.
 function usesServerFlow(dependencies: ActionDependencies): boolean {
@@ -103,7 +99,8 @@ function usesServerFlow(dependencies: ActionDependencies): boolean {
   return probe !== undefined
 }
 
-// v0.1.1, unchanged apart from the check-run-url and publisher outputs.
+// v0.1.1, apart from the check-run-url and publisher outputs and fail-on-violations, which no
+// longer fails the check or the job.
 async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
   const { runtime } = dependencies
   const apiKey = runtime.getInput('api-key')
@@ -122,6 +119,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
 
     const inputs = dependencies.readInputs(runtime)
     failOnScanError = inputs.failOnScanError
+    warnDeprecatedInput(runtime, inputs.failOnViolationsRaw)
     runtime.info(`Draftt scan: publish-mode action, endpoint ${endpointHost(inputs.apiUrl)}`)
 
     const workspaceRoot = dependencies.workspaceRoot()
@@ -133,7 +131,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     const report = await dependencies.buildScanReport(
       response,
       locator,
-      inputs.failOnViolations ? 'failure' : 'warning',
+      'warning',
       inputs.policyIds?.length === 0,
       reportOptions(repositoryFromPayload({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha })),
     )
@@ -141,8 +139,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     warningCount = report.warningCount
 
     await publisher.publishAnnotations(report.annotations)
-    const shouldFail = report.violationCount > 0 && inputs.failOnViolations
-    const conclusion = dependencies.completedConclusion(report.violationCount, inputs.failOnViolations)
+    const conclusion = dependencies.completedConclusion(report.violationCount)
     await publisher.finish(conclusion, report.title, report.summary)
     await writeWorkflowSummary(runtime, report.summary)
     const outputs: Outputs = {
@@ -155,8 +152,6 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     }
     setOutputs(runtime, outputs)
     logCompletion(runtime, outputs)
-
-    if (shouldFail) runtime.setFailed(`Draftt found policy violations in ${report.violationCount} Terraform resources.`)
   } catch (error) {
     const message = safeErrorMessage(error)
     let concluded = false
@@ -196,13 +191,11 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
   const headSha = dependencies.getHeadSha()
   let violationCount = 0
   let warningCount = 0
-  let failOnViolationsRaw: ActionInputs['failOnViolationsRaw'] = ''
-  let deprecationWarned = false
 
   try {
     const inputs = dependencies.readInputs(runtime)
     failOnScanError = inputs.failOnScanError
-    failOnViolationsRaw = inputs.failOnViolationsRaw
+    warnDeprecatedInput(runtime, inputs.failOnViolationsRaw)
 
     const workspaceRoot = dependencies.workspaceRoot()
     // An absolute terraform-root (e.g. ${{ github.workspace }}) is keyed relative to the same
@@ -234,15 +227,12 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
     const { body, sourceMapDropped } = dependencies.serializeScanRequest(plan, inputs.policyIds, github)
     if (sourceMapDropped) runtime.warning('The source map was dropped to keep the upload under 50 MiB; findings will remain in the Check summary.')
 
+    // The response's mode and conclusion, which older servers still send, are ignored.
     const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
-    // The Draftt CI mode decides; without one (an older service) the scan is advisory.
-    const mode = response.mode
-    if (!mode && response.publishError?.code !== 'not_bound') runtime.info(NO_MODE)
-    deprecationWarned = warnDeprecatedInput(runtime, inputs.failOnViolationsRaw, mode)
     const report = await dependencies.buildScanReport(
       response,
       locator,
-      mode === 'blocking' ? 'failure' : 'warning',
+      'warning',
       inputs.policyIds?.length === 0,
       reportOptions(repositoryFromPayload({ payload, env, headSha })),
     )
@@ -258,7 +248,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       if (inputs.githubToken) {
         try {
           const fallback = dependencies.createPublisher(inputs.githubToken, headSha, FALLBACK_CHECK_NAME)
-          await fallback.publishCompleted(fallbackConclusion(mode, report.violationCount), report.title, report.summary, report.annotations)
+          await fallback.publishCompleted(fallbackConclusion(report.violationCount), report.title, report.summary, report.annotations)
           outputs = { ...outputs, annotations: fallback.annotationCount, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
           runtime.info(`Posted the fallback check: ${outputs.checkRunUrl}`)
         } catch {
@@ -267,23 +257,13 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       } else if (!response.publishError) {
         runtime.warning('No check was published: Draftt CI reported neither a published check nor a publish error, and no github-token is available for a fallback check.')
       }
-      // Only the root key has a queued check, the one a ruleset can require, that times out and passes.
-      if (mode === 'blocking' && scanKey === ROOT_SCAN_KEY) {
-        runtime.warning(`${PUBLISH_FAILURE}${outputs.publisher === 'action' ? PUBLISH_FAILURE_FALLBACK : ''}`)
-      }
     }
 
     await writeWorkflowSummary(runtime, report.summary)
     setOutputs(runtime, outputs)
-    logCompletion(runtime, outputs, mode)
-    if (serverJobConclusion(response, report.violationCount) === 'failure') {
-      const count = report.violationCount
-      const where = outputs.checkRunUrl ? ` See the check: ${outputs.checkRunUrl}` : ''
-      runtime.setFailed(`Draftt CI is in blocking mode and found policy violations in ${count} Terraform ${plural(count, 'resource')}.${where}`)
-    }
+    logCompletion(runtime, outputs)
   } catch (error) {
     const message = safeErrorMessage(error)
-    if (!deprecationWarned) warnDeprecatedInput(runtime, failOnViolationsRaw, undefined)
     let outputs: Outputs = { status: 'error', violations: violationCount, warnings: warningCount, annotations: 0, checkRunUrl: '', publisher: 'none' }
     if (githubToken) {
       try {
@@ -335,23 +315,16 @@ function endpointHost(apiUrl: string): string {
   }
 }
 
-function logCompletion(runtime: ActionRuntime, outputs: Outputs, mode?: ScanMode): void {
+function logCompletion(runtime: ActionRuntime, outputs: Outputs): void {
   const counts = `violations ${outputs.violations}, warnings ${outputs.warnings}, annotations ${outputs.annotations}`
   const check = outputs.publisher === 'none' ? 'no check was published' : `check published by ${outputs.publisher}: ${outputs.checkRunUrl}`
-  const modeNote = mode ? `; mode ${mode} (set in the Draftt console: Integrations › Draftt CI)` : ''
-  runtime.info(`Draftt scan completed (${counts}); ${check}${modeNote}`)
+  runtime.info(`Draftt scan completed (${counts}); ${check}`)
 }
 
-// The server flow only: fail-on-violations is a no-op there. Nothing when the input is absent.
-function warnDeprecatedInput(runtime: ActionRuntime, raw: ActionInputs['failOnViolationsRaw'], mode: ScanMode | undefined): boolean {
-  if (raw === '') return false
-  runtime.warning(raw === 'true' && mode === 'advisory' ? ADVISORY_DEPRECATION : DEPRECATION)
-  return true
-}
-
-// Same rule as the shared renderer's plural() in report.ts, whose shared block is hash-pinned and not exported.
-function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`
+// fail-on-violations is a no-op in every flow. Printed once per run, right after the inputs are
+// read, and only when the input is true: false or unset changes nothing, so it says nothing.
+function warnDeprecatedInput(runtime: ActionRuntime, raw: ActionInputs['failOnViolationsRaw']): void {
+  if (raw === 'true') runtime.warning(DEPRECATION)
 }
 
 function errorSummary(message: string): string {

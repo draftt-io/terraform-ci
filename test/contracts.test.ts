@@ -116,6 +116,19 @@ test('parses mode and conclusion only when they are exactly the known strings', 
   assert.equal('conclusion' in old, false)
 })
 
+test('a response without mode is accepted', () => {
+  // The new server sends neither mode nor conclusion; the parser keeps both optional and nothing reads them.
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 2, publishError: null })
+  assert.equal(parsed.checkRunUrl, 'https://github.com/o/r/runs/1')
+  assert.equal(parsed.annotationCount, 2)
+  assert.equal('mode' in parsed, false)
+  assert.equal('conclusion' in parsed, false)
+  // The current server still sends conclusion without mode.
+  const withConclusion = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', conclusion: 'neutral' })
+  assert.equal('mode' in withConclusion, false)
+  assert.equal(withConclusion.conclusion, 'neutral')
+})
+
 test('keeps an https policyUrl on a Draftt console policy page and drops any other, keeping the policy', () => {
   const policyUrlOf = (policyUrl: unknown) =>
     parseScanResponse({ ...scanResponse(), evaluation: { ...scanResponse().evaluation, evaluatedPolicies: [{ policyId: '10', name: 'Supported', policyUrl }] } })

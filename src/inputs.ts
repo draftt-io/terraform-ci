@@ -9,9 +9,9 @@ export interface ActionInputs {
   githubToken?: string
   terraformRoot: string
   policyIds?: string[]
-  // Deprecated: decides the verdict only in the v0.1.1 flow; in the server flow the Draftt CI mode does.
+  // Deprecated and a no-op in every flow; still sent in the github block, which the server ignores.
   failOnViolations: boolean
-  // As given: '' when unset, which the server flow needs to decide on the deprecation warning.
+  // As given: '' when unset; the deprecation warning prints only for 'true'.
   failOnViolationsRaw: '' | 'true' | 'false'
   failOnScanError: boolean
   publishMode: PublishMode

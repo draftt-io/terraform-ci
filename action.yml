@@ -24,7 +24,7 @@ inputs:
     description: Optional JSON array of Draftt policy ids
     required: false
   fail-on-violations:
-    description: "Deprecated. Used only where the Action publishes its own check (publish-mode: action, events other than pull requests, or an api-url not ending in /v1/scans). With publish-mode: server on pull requests, the Draftt CI mode set by a Draftt Admin in the Draftt console decides whether the check fails."
+    description: "Deprecated and ignored: Draftt CI checks never fail on violations, in any flow; violations are reported in the check and PR comment. When set to true the Action logs a warning."
     required: false
     default: ""
   fail-on-scan-error:
