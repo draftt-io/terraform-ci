@@ -73,7 +73,7 @@ function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value !== ''
 }
 
-// The server rejects a non-https workflowRunUrl with 400; it is optional, so omit it rather than fail the upload.
+// The server rejects a non-https workflowRunUrl with 422 (validation); it is optional, so omit it rather than fail the upload.
 function buildWorkflowRunUrl(env: NodeJS.ProcessEnv, runId: number): string | undefined {
   if (!env.GITHUB_SERVER_URL || !env.GITHUB_REPOSITORY) return undefined
   const url = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${runId}`
