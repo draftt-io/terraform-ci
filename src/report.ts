@@ -24,10 +24,12 @@ export const MAX_ROWS_PER_RESOURCE = 10
 export const MAX_PUBLISHED_ANNOTATIONS = 500
 // Room kept for the collapsed lists so a long table can never squeeze them out entirely.
 const INCOMPLETE_RESERVE = 12_000
+const UNCHANGED_RESERVE = 12_000
 const OVERFLOW_RESERVE = 1_000
 export const DOCS_URL = 'https://docs.draftt.io/ci'
 const GITHUB_WEB_URL = 'https://github.com'
 export const NO_VIOLATIONS_TITLE = 'No policy violations found'
+export const NO_CHANGED_VIOLATIONS_TITLE = 'No policy violations on changed resources'
 export const NO_POLICIES_TITLE = 'No policies evaluated'
 const NO_TRACKED_RESOURCES = 'No Draftt-tracked resources in this plan.'
 const DITTO = '″'
@@ -54,6 +56,9 @@ export interface ReportRepository {
 
 export interface ReportOptions {
   repository?: ReportRepository
+  // Report scope 'changed' (the service only): the findings on resources the pull request leaves as they are, shown
+  // collapsed and never annotated, and the number of resources the plan changes. Absent, the report is the whole plan.
+  unchanged?: { components: FlaggedComponent[]; changedResourceCount: number }
 }
 
 interface SourceLocation {
@@ -106,21 +111,9 @@ export async function buildScanReport(
   noPoliciesSelected: boolean,
   options: ReportOptions = {},
 ): Promise<ScanReport> {
-  const resources: ResourceEntry[] = []
-  for (const component of response.components) {
-    const mapping = locator ? await locator.locate(component) : undefined
-    const hits = [...component.policyComponents].sort(compareHits)
-    const rank = Math.min(OTHER_STATUS_RANK, ...hits.map((hit) => statusRank(hit.status)))
-    resources.push({
-      component,
-      ...(mapping?.kind === 'found' ? { location: { path: mapping.location.path, startLine: mapping.location.startLine } } : {}),
-      hits,
-      rank,
-      // The date of the hits that set the rank: a later, less urgent hit never pulls a resource up.
-      sortDate: earliestDate(hits.filter((hit) => statusRank(hit.status) === rank).map(hitDate)) ?? NO_DATE,
-    })
-  }
-  resources.sort(compareResources)
+  const resources = await resourceEntries(response.components, locator)
+  // Never annotated and never counted as violations: the pull request does not change these resources.
+  const unchangedResources = options.unchanged ? await resourceEntries(options.unchanged.components, locator) : []
 
   const annotations: CheckAnnotation[] = []
   let unannotated = 0
@@ -149,7 +142,10 @@ export async function buildScanReport(
   const violationTotal = resources.reduce((count, resource) => count + resource.hits.length, 0)
   // Only when something was mapped: a plan with no Draftt-tracked resource gets the zero-violation layout.
   const noPoliciesEvaluated =
-    resources.length === 0 && response.summary.componentsMapped > 0 && (noPoliciesSelected || response.evaluation.evaluatedPolicies?.length === 0)
+    resources.length === 0 &&
+    unchangedResources.length === 0 &&
+    response.summary.componentsMapped > 0 &&
+    (noPoliciesSelected || response.evaluation.evaluatedPolicies?.length === 0)
 
   let title: string
   let head: string[]
@@ -159,10 +155,12 @@ export async function buildScanReport(
       noPoliciesSelected ? 'none_selected' : (response.evaluation.excludedEvaluatedPolicyCount ?? 0) > 0 ? 'all_excluded' : 'none_apply',
     )
   } else if (resources.length === 0) {
-    title = incompleteCount > 0 ? `${NO_VIOLATIONS_TITLE} (${incompleteText(incompleteCount)})` : NO_VIOLATIONS_TITLE
+    const clean = unchangedResources.length > 0 ? NO_CHANGED_VIOLATIONS_TITLE : NO_VIOLATIONS_TITLE
+    title = incompleteCount > 0 ? `${clean} (${incompleteText(incompleteCount)})` : clean
     head = [checkedLine(response)]
   } else {
-    title = `${violationTotal} policy ${plural(violationTotal, 'violation')} on ${resources.length} ${plural(resources.length, 'resource')}`
+    const changed = options.unchanged ? 'changed ' : ''
+    title = `${violationTotal} policy ${plural(violationTotal, 'violation')} on ${resources.length} ${changed}${plural(resources.length, 'resource')}`
     head = [countsLine(resources, incompleteCount)]
   }
 
@@ -172,22 +170,36 @@ export async function buildScanReport(
           `Not annotated in Files changed: ${unannotated} ${plural(unannotated, 'resource')} with violations (GitHub accepts at most ${MAX_PUBLISHED_ANNOTATIONS} annotations per check).`,
         ]
       : []
-  const footer = [footerLine(response, resources.length > 0 ? annotations.length : undefined)]
+  const footer = [footerLine(response, resources.length > 0 ? annotations.length : undefined, options.unchanged?.changedResourceCount)]
 
   // Budgeted by whole lines, most important first: the table, then the resources it could not
-  // hold, then the incomplete checks. Each collapsed block closes its own <details>.
+  // hold, then the findings on unchanged resources, then the incomplete checks. Each collapsed block
+  // closes its own <details>.
+  const urls = policyUrls(response)
   const incomplete = incompleteSection(response, incompleteCount)
   const fixed = blockSize(head) + blockSize(note) + blockSize(footer)
   const incompleteRoom = incomplete ? Math.min(INCOMPLETE_RESERVE, blockSize(detailsBlock(incomplete, Number.MAX_SAFE_INTEGER))) : 0
+  const unchangedRoom =
+    unchangedResources.length > 0
+      ? Math.min(UNCHANGED_RESERVE, blockSize(unchangedSection(unchangedResources, options.repository, urls, Number.MAX_SAFE_INTEGER)))
+      : 0
   const overflowRoom = resources.length > 0 ? OVERFLOW_RESERVE : 0
-  const table = violationTable(resources, options.repository, policyUrls(response), SUMMARY_BUDGET - fixed - incompleteRoom - overflowRoom)
+  const table = violationTable(resources, options.repository, urls, SUMMARY_BUDGET - fixed - incompleteRoom - unchangedRoom - overflowRoom)
   const overflow = overflowBlock(
     resources.filter((resource) => !table.shown.has(resource)),
-    SUMMARY_BUDGET - fixed - incompleteRoom - blockSize(table.lines),
+    SUMMARY_BUDGET - fixed - incompleteRoom - unchangedRoom - blockSize(table.lines),
   )
-  const incompleteLines = incomplete ? detailsBlock(incomplete, SUMMARY_BUDGET - fixed - blockSize(table.lines) - blockSize(overflow)) : []
+  const unchangedLines = unchangedSection(
+    unchangedResources,
+    options.repository,
+    urls,
+    SUMMARY_BUDGET - fixed - incompleteRoom - blockSize(table.lines) - blockSize(overflow),
+  )
+  const incompleteLines = incomplete
+    ? detailsBlock(incomplete, SUMMARY_BUDGET - fixed - blockSize(table.lines) - blockSize(overflow) - blockSize(unchangedLines))
+    : []
 
-  const blocks = [head, table.lines, overflow, incompleteLines, note, footer].filter((block) => block.length > 0)
+  const blocks = [head, table.lines, overflow, unchangedLines, incompleteLines, note, footer].filter((block) => block.length > 0)
   return {
     title,
     summary: truncate(blocks.map((block) => block.join('\n')).join('\n\n'), MAX_SUMMARY_LENGTH),
@@ -195,6 +207,25 @@ export async function buildScanReport(
     violationCount: resources.length,
     warningCount,
   }
+}
+
+// Each component with its source location and its hits in urgency order; the most urgent resource first.
+async function resourceEntries(components: FlaggedComponent[], locator: SourceLocator | undefined): Promise<ResourceEntry[]> {
+  const resources: ResourceEntry[] = []
+  for (const component of components) {
+    const mapping = locator ? await locator.locate(component) : undefined
+    const hits = [...component.policyComponents].sort(compareHits)
+    const rank = Math.min(OTHER_STATUS_RANK, ...hits.map((hit) => statusRank(hit.status)))
+    resources.push({
+      component,
+      ...(mapping?.kind === 'found' ? { location: { path: mapping.location.path, startLine: mapping.location.startLine } } : {}),
+      hits,
+      rank,
+      // The date of the hits that set the rank: a later, less urgent hit never pulls a resource up.
+      sortDate: earliestDate(hits.filter((hit) => statusRank(hit.status) === rank).map(hitDate)) ?? NO_DATE,
+    })
+  }
+  return resources.sort(compareResources)
 }
 
 const NO_POLICIES_REASONS = {
@@ -255,10 +286,11 @@ function statusCounts(hits: PolicyHit[]): string[] {
   return counts
 }
 
-function footerLine(response: ScanResponse, annotated: number | undefined): string {
+function footerLine(response: ScanResponse, annotated: number | undefined, changed: number | undefined): string {
   const { managedResourcesInPlan, componentsMapped } = response.summary
   const parts = [
     `${managedResourcesInPlan} ${plural(managedResourcesInPlan, 'resource')} in plan`,
+    ...(changed !== undefined ? [`${changed} changed`] : []),
     `${componentsMapped} mapped to Draftt ${plural(componentsMapped, 'component')}`,
   ]
   const merged = response.coverage.mergedResources.length
@@ -382,6 +414,32 @@ function changeText(hit: PolicyHit, component: FlaggedComponent, code: (value: s
   let full = parts.join(' ')
   if (hit.hasForceUpgrade) full = full ? `${full}, forced upgrade` : 'Forced upgrade'
   return { full: full || '—', short: target !== undefined ? `→ ${code(target)}` : '—' }
+}
+
+// Report scope 'changed': the findings on resources the pull request leaves as they are, collapsed, in the
+// table's own layout and cap. Resources the table cannot hold (past 25, past `room`, or a row over the line
+// limit) are counted on a closing line, a blank line below the table so GFM does not read it as a row.
+function unchangedSection(
+  entries: ResourceEntry[],
+  repository: ReportRepository | undefined,
+  urls: ReadonlyMap<string, string>,
+  room: number,
+): string[] {
+  if (entries.length === 0) return []
+  const findings = entries.reduce((count, entry) => count + entry.hits.length, 0)
+  const open = [
+    `<details><summary><strong>${findings} pre-existing ${plural(findings, 'finding')}</strong> on ${entries.length} unchanged ${plural(entries.length, 'resource')}</summary>`,
+    '',
+  ]
+  const close = ['', '</details>']
+  const more = (count: number) => `${count} more unchanged ${plural(count, 'resource')} not shown`
+  const tableRoom = (tail: string[]) => room - [...open, ...tail, ...close].reduce((total, line) => total + line.length + 1, 0)
+  // The closing line takes room only when some resource is left out.
+  let table = violationTable(entries, repository, urls, tableRoom([]))
+  if (table.shown.size < entries.length) table = violationTable(entries, repository, urls, tableRoom(['', more(entries.length)]))
+  const hidden = entries.length - table.shown.size
+  if (table.lines.length === 0) return [...open, more(hidden), ...close]
+  return [...open, ...table.lines, ...(hidden > 0 ? ['', more(hidden)] : []), ...close]
 }
 
 // Resources the table could not hold: unmapped first, because they have no annotation either.

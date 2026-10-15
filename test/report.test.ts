@@ -208,7 +208,7 @@ test('matches every case of the parity fixture shared with draftt-ci', async () 
   }
 })
 
-test('parity pin equals e36bf9a3…948e', () => {
+test('parity pin equals 83f0fc6b…edc5', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/parity.json', import.meta.url), 'utf8')) as { sharedBlockSha256: string }
-  assert.equal(fixture.sharedBlockSha256, 'e36bf9a38decba0d720f3668ad79c31b6154fea8dfabb31f176db519ebba948e')
+  assert.equal(fixture.sharedBlockSha256, '83f0fc6ba0f90513181439a02c7f00a318fbc19fed03705985d248301a16edc5')
 })
