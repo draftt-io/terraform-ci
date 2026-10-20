@@ -205,7 +205,7 @@ function optionalEvaluatedPolicies(value: unknown): { evaluatedPolicies?: Array<
 
 const POLICY_PATH = /^\/policy\/[1-9][0-9]{0,18}$/
 
-// The https-only copy of draftt-ci's isTrustedPolicyUrl (src/scan/policyLinks.ts), which also accepts the
+// The https-only copy of ui-backend's isTrustedPolicyUrl (src/services/githubDrafttCi/report/policyLinks.ts), which also accepts the
 // dev console over http. The link must point at a Draftt console policy page and be canonical (href equals
 // the input), so whitespace, control characters, an upper-case host, encoded digits and an empty `?` or
 // `#` are rejected and the string the report renders is exactly what was checked.

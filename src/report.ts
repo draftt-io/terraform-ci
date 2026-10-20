@@ -1,4 +1,4 @@
-// Redesigned in draftt-ci Task 9b. Only the block above the "Shared renderer" marker is
+// Builds the check-run report. Only the block above the "Shared renderer" marker is
 // Action-specific; test/fixtures/parity.json pins the output of the rest.
 import type { FlaggedComponent, PolicyHit, ScanResponse } from './contracts.ts'
 import type { AnnotationLevel, CheckAnnotation } from './github-check.ts'

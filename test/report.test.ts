@@ -178,7 +178,7 @@ interface ParityCase {
   expected: unknown
 }
 
-test('matches every case of the parity fixture shared with draftt-ci', async () => {
+test('matches every case of the parity fixture shared with ui-backend', async () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/parity.json', import.meta.url), 'utf8')) as { cases: ParityCase[] }
   assert.deepEqual(
     fixture.cases.map((entry) => entry.name),

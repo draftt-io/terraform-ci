@@ -57,7 +57,6 @@ export interface ActionDependencies {
   eventPayload(): Record<string, unknown>
   env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
-  // The shared renderer still takes a level; every flow passes 'warning'.
   buildScanReport(input: BuildScanReportInput): Promise<ScanReport>
   completedConclusion(violationCount: number): CheckConclusion
   scanErrorConclusion(failOnScanError: boolean): CheckConclusion
@@ -274,7 +273,7 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
   }
 }
 
-// Without a repository the renderer prints path:line unlinked.
+// Every flow annotates at 'warning'; without a repository the renderer prints path:line unlinked.
 function reportInput(input: {
   response: ScanResponse
   locator: SourceLocator | undefined
