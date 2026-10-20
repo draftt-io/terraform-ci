@@ -3,12 +3,12 @@ import test from 'node:test'
 import type { ScanResponse } from '../src/contracts.ts'
 import { ScanRequestFailure, scanTerraformPlan } from '../src/api.ts'
 import { CHECK_NAME, FALLBACK_CHECK_NAME } from '../src/github-check.ts'
-import type { CheckAnnotation, CheckConclusion } from '../src/github-check.ts'
+import type { AnnotationLevel, CheckAnnotation, CheckConclusion } from '../src/github-check.ts'
 import type { ActionInputs } from '../src/inputs.ts'
 import { completedConclusion, scanErrorConclusion } from '../src/outcome.ts'
 import type { SanitizedPlan } from '../src/plan.ts'
 import type { GitHubScanContext } from '../src/request.ts'
-import type { ReportOptions, ScanReport } from '../src/report.ts'
+import type { ReportRepository, ScanReport } from '../src/report.ts'
 import { run, type ActionDependencies, type ActionRuntime, type CheckPublisherLike } from '../src/run.ts'
 import type { WorkspaceSourceStatus } from '../src/workspace.ts'
 import { scanResponse } from './fixtures.ts'
@@ -123,7 +123,7 @@ function createHarness(options: HarnessOptions = {}): {
   runtime: FakeRuntime
   publisher: FakePublisher
   events: string[]
-  calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: Array<'warning' | 'failure'>; reportOptions: Array<ReportOptions | undefined> }
+  calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: AnnotationLevel[]; repositories: Array<ReportRepository | undefined> }
 } {
   const failOnViolations = options.failOnViolations ?? false
   const failOnScanError = options.failOnScanError ?? false
@@ -134,7 +134,7 @@ function createHarness(options: HarnessOptions = {}): {
   const runtime = new FakeRuntime(runtimeInputs)
   const events: string[] = []
   const publisher = new FakePublisher(events)
-  const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as Array<'warning' | 'failure'>, reportOptions: [] as Array<ReportOptions | undefined> }
+  const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as AnnotationLevel[], repositories: [] as Array<ReportRepository | undefined> }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
     apiUrl,
@@ -221,9 +221,9 @@ function createHarness(options: HarnessOptions = {}): {
         if (options.scanError) throw options.scanError
         return { ...response, ...options.response }
       },
-      buildScanReport: async (_response, _locator, level, _noPoliciesSelected, reportOptions) => {
-        calls.levels.push(level)
-        calls.reportOptions.push(reportOptions)
+      buildScanReport: async ({ annotationLevel, repository }) => {
+        calls.levels.push(annotationLevel)
+        calls.repositories.push(repository)
         return report
       },
       completedConclusion,
@@ -864,14 +864,14 @@ const REPOSITORY = { owner: { login: 'draftt-io' }, name: 'infra' }
 test('action mode links path:line to the head commit of the payload repository', async () => {
   const h = createHarness({ publishMode: 'action', payload: { ...PR, repository: REPOSITORY } })
   await run(h.dependencies)
-  assert.deepEqual(h.calls.reportOptions, [{ repository: { owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA } }])
+  assert.deepEqual(h.calls.repositories, [{ owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA }])
 })
 
 test('a push event in action mode still links files, from GITHUB_REPOSITORY', async () => {
   const h = createHarness({ payload: { ref: 'refs/heads/main' }, env: { GITHUB_REPOSITORY: 'draftt-io/infra' } })
   await run(h.dependencies)
   assert.deepEqual(h.publisher.names, [CHECK_NAME])
-  assert.deepEqual(h.calls.reportOptions, [{ repository: { owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA } }])
+  assert.deepEqual(h.calls.repositories, [{ owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA }])
 })
 
 test('the server flow report, and so the fallback check, links files too', async () => {
@@ -879,11 +879,11 @@ test('the server flow report, and so the fallback check, links files too', async
   await run(h.dependencies)
   assert.deepEqual(h.publisher.names, [FALLBACK_CHECK_NAME])
   assert.equal(h.publisher.completed.length, 1)
-  assert.deepEqual(h.calls.reportOptions, [{ repository: { owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA } }])
+  assert.deepEqual(h.calls.repositories, [{ owner: 'draftt-io', repo: 'infra', headSha: HEAD_SHA }])
 })
 
 test('without a repository the report gets no file links', async () => {
   const h = createHarness({ publishMode: 'action', payload: PR })
   await run(h.dependencies)
-  assert.deepEqual(h.calls.reportOptions, [{}])
+  assert.deepEqual(h.calls.repositories, [undefined])
 })

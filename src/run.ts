@@ -4,7 +4,7 @@ import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckConclu
 import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
 import { fallbackConclusion } from './outcome.ts'
 import type { SanitizedPlan } from './plan.ts'
-import type { ReportOptions, ReportRepository, ScanReport, SourceLocator } from './report.ts'
+import type { BuildScanReportInput, ReportRepository, ScanReport, SourceLocator } from './report.ts'
 import { repositoryFromPayload, type GitHubScanContext, type SourceMapEntry } from './request.ts'
 import { MAX_SOURCE_MAP_ENTRIES } from './source-map.ts'
 import type { WorkspaceSourceStatus } from './workspace.ts'
@@ -58,13 +58,7 @@ export interface ActionDependencies {
   env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
   // The shared renderer still takes a level; every flow passes 'warning'.
-  buildScanReport(
-    response: ScanResponse,
-    locator: SourceLocator | undefined,
-    annotationLevel: 'warning' | 'failure',
-    noPoliciesSelected: boolean,
-    options?: ReportOptions,
-  ): Promise<ScanReport>
+  buildScanReport(input: BuildScanReportInput): Promise<ScanReport>
   completedConclusion(violationCount: number): CheckConclusion
   scanErrorConclusion(failOnScanError: boolean): CheckConclusion
   workspaceRoot(): string
@@ -128,13 +122,12 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     const locator = await sourceLocatorFor(dependencies, workspaceRoot, headSha, inputs.terraformRoot)
 
     const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
-    const report = await dependencies.buildScanReport(
+    const report = await dependencies.buildScanReport(reportInput({
       response,
       locator,
-      'warning',
-      inputs.policyIds?.length === 0,
-      reportOptions(repositoryFromPayload({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha })),
-    )
+      policyIds: inputs.policyIds,
+      repository: repositoryFromPayload({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha }),
+    }))
     violationCount = report.violationCount
     warningCount = report.warningCount
 
@@ -229,13 +222,12 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
 
     // The response's mode and conclusion, which older servers still send, are ignored.
     const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
-    const report = await dependencies.buildScanReport(
+    const report = await dependencies.buildScanReport(reportInput({
       response,
       locator,
-      'warning',
-      inputs.policyIds?.length === 0,
-      reportOptions(repositoryFromPayload({ payload, env, headSha })),
-    )
+      policyIds: inputs.policyIds,
+      repository: repositoryFromPayload({ payload, env, headSha }),
+    }))
     violationCount = report.violationCount
     warningCount = report.warningCount
 
@@ -283,8 +275,20 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
 }
 
 // Without a repository the renderer prints path:line unlinked.
-function reportOptions(repository: ReportRepository | undefined): ReportOptions {
-  return repository ? { repository } : {}
+function reportInput(input: {
+  response: ScanResponse
+  locator: SourceLocator | undefined
+  policyIds: string[] | undefined
+  repository: ReportRepository | undefined
+}): BuildScanReportInput {
+  const { response, locator, policyIds, repository } = input
+  return {
+    response,
+    annotationLevel: 'warning',
+    noPoliciesSelected: policyIds?.length === 0,
+    ...(locator ? { locator } : {}),
+    ...(repository ? { repository } : {}),
+  }
 }
 
 async function sourceLocatorFor(

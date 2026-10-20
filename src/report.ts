@@ -8,10 +8,13 @@ export interface SourceLocator {
   locate(reference: TerraformComponentReference): Promise<SourceMapping>
 }
 
-// ---- Shared renderer: byte-identical in draftt-ci src/reporters/scanReport.ts and terraform-ci src/report.ts from this line down. ----
+// ---- Shared renderer: byte-identical in ui-backend src/services/githubDrafttCi/report/scanReport.ts and terraform-ci src/report.ts from this line down. ----
 
 const MAX_SUMMARY_LENGTH = 60_000
 const MAX_ANNOTATION_MESSAGE_LENGTH = 60_000
+// GitHub's limit on an annotation title.
+const MAX_ANNOTATION_TITLE_LENGTH = 255
+const TRUNCATED_MARKER = '\n… truncated'
 const MAX_SECTION_ITEMS = 25
 export const MAX_SUMMARY_LINE_LENGTH = 500
 export const MAX_VALUE_CHARS = 200
@@ -79,38 +82,43 @@ interface HitGroup {
   count: number
 }
 
-const KNOWN_STATUSES = new Map<string, { label: string; rank: number }>([
-  ['outdated', { label: 'Outdated', rank: 0 }],
-  ['noncompliant', { label: 'Non-compliant', rank: 1 }],
-  ['impending', { label: 'Impending', rank: 2 }],
-])
+// In urgency order; the order is the order of the status counts.
+const KNOWN_STATUSES = {
+  outdated: { label: 'Outdated', rank: 0 },
+  noncompliant: { label: 'Non-compliant', rank: 1 },
+  impending: { label: 'Impending', rank: 2 },
+} as const
 
-const UNEVALUATED_REASONS = new Map<string, string>([
-  ['not_found', 'This policy was not found in your organization'],
-  ['inactive', 'This policy is inactive'],
-  ['unsupported_policy', 'This policy type is not supported in CI scans yet'],
-  ['error', 'Draftt could not evaluate this policy'],
-])
+type KnownStatus = (typeof KNOWN_STATUSES)[keyof typeof KNOWN_STATUSES]
 
-const GAP_REASONS = new Map<string, string>([
-  ['missing_data', 'The plan does not contain the data this policy needs'],
-  ['error', 'Draftt could not evaluate this policy for this resource'],
-])
+const UNEVALUATED_REASONS = {
+  not_found: 'This policy was not found in your organization',
+  inactive: 'This policy is inactive',
+  unsupported_policy: 'This policy type is not supported in CI scans yet',
+  error: 'Draftt could not evaluate this policy',
+} as const
 
-const UNMAPPED_REASONS = new Map<string, string>([
-  ['unknown_technology', 'Draftt does not track this resource type yet'],
-  ['no_version', 'The plan has no version for this resource'],
-  ['orphaned_child', 'Its parent resource is not in the plan'],
-  ['unresolvable_version', 'Draftt could not resolve the version from the plan'],
-])
+const GAP_REASONS = {
+  missing_data: 'The plan does not contain the data this policy needs',
+  error: 'Draftt could not evaluate this policy for this resource',
+} as const
 
-export async function buildScanReport(
-  response: ScanResponse,
-  locator: SourceLocator | undefined,
-  annotationLevel: AnnotationLevel,
-  noPoliciesSelected: boolean,
-  options: ReportOptions = {},
-): Promise<ScanReport> {
+const UNMAPPED_REASONS = {
+  unknown_technology: 'Draftt does not track this resource type yet',
+  no_version: 'The plan has no version for this resource',
+  orphaned_child: 'Its parent resource is not in the plan',
+  unresolvable_version: 'Draftt could not resolve the version from the plan',
+} as const
+
+export interface BuildScanReportInput extends ReportOptions {
+  response: ScanResponse
+  locator?: SourceLocator
+  annotationLevel: AnnotationLevel
+  noPoliciesSelected: boolean
+}
+
+export async function buildScanReport(input: BuildScanReportInput): Promise<ScanReport> {
+  const { response, locator, annotationLevel, noPoliciesSelected, ...options } = input
   const resources = await resourceEntries(response.components, locator)
   // Never annotated and never counted as violations: the pull request does not change these resources.
   const unchangedResources = options.unchanged ? await resourceEntries(options.unchanged.components, locator) : []
@@ -130,7 +138,7 @@ export async function buildScanReport(
       annotation_level: annotationLevel,
       title: cutOnWord(
         `${statusLabel(resource.hits[0]?.status ?? '')}: ${resource.hits.length} ${plural(resource.hits.length, 'policy violation')} on ${resource.component.tfType}`,
-        255,
+        MAX_ANNOTATION_TITLE_LENGTH,
       ),
       message: truncateBytes(formatViolation(resource), MAX_ANNOTATION_MESSAGE_LENGTH),
     })
@@ -277,11 +285,11 @@ function incompleteText(count: number): string {
 // "8 outdated", "4 impending", ... in urgency order; statuses outside the known set count as "other".
 function statusCounts(hits: PolicyHit[]): string[] {
   const counts: string[] = []
-  for (const [key, status] of KNOWN_STATUSES) {
+  for (const [key, status] of Object.entries(KNOWN_STATUSES)) {
     const count = hits.filter((hit) => statusKey(hit.status) === key).length
     if (count > 0) counts.push(`${count} ${status.label.toLowerCase()}`)
   }
-  const other = hits.filter((hit) => !KNOWN_STATUSES.has(statusKey(hit.status))).length
+  const other = hits.filter((hit) => !knownStatus(hit.status)).length
   if (other > 0) counts.push(`${other} other`)
   return counts
 }
@@ -370,8 +378,8 @@ function fitRow(
   policy: readonly [string, string, string],
   change: readonly [string, string, string],
 ): string | undefined {
-  for (const [r, p, c] of ROW_STEPS) {
-    const row = `| ${resource[r]} | ${status} | ${policy[p]} | ${change[c]} |`
+  for (const [resourceForm, policyForm, changeForm] of ROW_STEPS) {
+    const row = `| ${resource[resourceForm]} | ${status} | ${policy[policyForm]} | ${change[changeForm]} |`
     if (row.length <= MAX_SUMMARY_LINE_LENGTH) return row
   }
   return undefined
@@ -387,7 +395,7 @@ function resourceCells(resource: ResourceEntry, repository: ReportRepository | u
 }
 
 function statusCell(status: string): string {
-  return KNOWN_STATUSES.get(statusKey(status))?.label ?? tableCode(status)
+  return knownStatus(status)?.label ?? tableCode(status)
 }
 
 // [linked, withName, plain]: the policy name links to its console page when the response has a URL
@@ -432,14 +440,17 @@ function unchangedSection(
     '',
   ]
   const close = ['', '</details>']
-  const more = (count: number) => `${count} more unchanged ${plural(count, 'resource')} not shown`
   const tableRoom = (tail: string[]) => room - [...open, ...tail, ...close].reduce((total, line) => total + line.length + 1, 0)
   // The closing line takes room only when some resource is left out.
   let table = violationTable(entries, repository, urls, tableRoom([]))
-  if (table.shown.size < entries.length) table = violationTable(entries, repository, urls, tableRoom(['', more(entries.length)]))
+  if (table.shown.size < entries.length) table = violationTable(entries, repository, urls, tableRoom(['', unchangedNotShown(entries.length)]))
   const hidden = entries.length - table.shown.size
-  if (table.lines.length === 0) return [...open, more(hidden), ...close]
-  return [...open, ...table.lines, ...(hidden > 0 ? ['', more(hidden)] : []), ...close]
+  if (table.lines.length === 0) return [...open, unchangedNotShown(hidden), ...close]
+  return [...open, ...table.lines, ...(hidden > 0 ? ['', unchangedNotShown(hidden)] : []), ...close]
+}
+
+function unchangedNotShown(count: number): string {
+  return `${count} more unchanged ${plural(count, 'resource')} not shown`
 }
 
 // Resources the table could not hold: unmapped first, because they have no annotation either.
@@ -532,8 +543,8 @@ function fitLine(candidates: string[]): string {
   )
 }
 
-function reasonText(known: Map<string, string>, reason: string): string {
-  return known.get(reason) ?? tableCode(reason)
+function reasonText(known: Readonly<Record<string, string>>, reason: string): string {
+  return (Object.hasOwn(known, reason) ? known[reason] : undefined) ?? tableCode(reason)
 }
 
 // A collapsed section that fits `room` characters: whole rows only, then "… N more not shown",
@@ -562,7 +573,7 @@ function formatViolation(resource: ResourceEntry): string {
   const lines = [`${total} policy ${plural(total, 'violation')} on ${plainValue(resource.component.address)}`]
   for (const group of groupHits(resource.hits, named)) {
     const { hit } = group
-    const status = KNOWN_STATUSES.get(statusKey(hit.status))?.label ?? (hit.status.trim() ? plainValue(hit.status) : 'Unknown status')
+    const status = knownStatus(hit.status)?.label ?? (hit.status.trim() ? plainValue(hit.status) : 'Unknown status')
     const policy = named && hit.name ? `${plainValue(hit.policyName)} · ${plainValue(hit.name)}` : plainValue(hit.policyName)
     lines.push('', `${status}: ${policy}${group.count > 1 ? ` ×${group.count}` : ''}`)
     const change = changeText(hit, resource.component, plainValue).full
@@ -596,16 +607,26 @@ function groupHits(hits: PolicyHit[], named: boolean): HitGroup[] {
   return [...groups.values()]
 }
 
+function knownStatus(status: string): KnownStatus | null {
+  const key = statusKey(status)
+  return isKnownStatusKey(key) ? KNOWN_STATUSES[key] : null
+}
+
+// Own keys only: a status such as 'constructor' must not resolve through Object.prototype.
+function isKnownStatusKey(key: string): key is keyof typeof KNOWN_STATUSES {
+  return Object.hasOwn(KNOWN_STATUSES, key)
+}
+
 function statusKey(status: string): string {
   return status.toLowerCase().replace(/[-_\s]+/g, '')
 }
 
 function statusLabel(status: string): string {
-  return KNOWN_STATUSES.get(statusKey(status))?.label ?? 'Other'
+  return knownStatus(status)?.label ?? 'Other'
 }
 
 function statusRank(status: string): number {
-  return KNOWN_STATUSES.get(statusKey(status))?.rank ?? OTHER_STATUS_RANK
+  return knownStatus(status)?.rank ?? OTHER_STATUS_RANK
 }
 
 // The date a hit is due by: its due date, else when it becomes outdated, else when it became
@@ -729,18 +750,17 @@ export function cutOnWord(value: string, maximum: number): string {
 }
 
 function truncate(value: string, maximum: number): string {
-  return value.length <= maximum ? value : `${value.slice(0, maximum - 14)}\n… truncated`
+  return value.length <= maximum ? value : `${value.slice(0, maximum - TRUNCATED_MARKER.length)}${TRUNCATED_MARKER}`
 }
 
 // An annotation message is capped at 60,000 UTF-8 bytes, never in the middle of a character.
 function truncateBytes(value: string, maximumBytes: number): string {
   if (Buffer.byteLength(value) <= maximumBytes) return value
-  const marker = '\n… truncated'
   const kept = Buffer.from(value)
-    .subarray(0, maximumBytes - Buffer.byteLength(marker))
+    .subarray(0, maximumBytes - Buffer.byteLength(TRUNCATED_MARKER))
     .toString('utf8')
     .replace(/�+$/, '')
-  return `${kept}${marker}`
+  return `${kept}${TRUNCATED_MARKER}`
 }
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {

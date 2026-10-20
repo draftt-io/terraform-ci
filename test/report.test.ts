@@ -20,7 +20,7 @@ test('creates one plain-text source annotation per violating component', async (
   try {
     await writeFile(path.join(repository, 'main.tf'), 'resource "aws_db_instance" "primary" {}\n')
     const locator = await TerraformSourceLocator.create({ workspaceRoot: repository, terraformRoot: '.' })
-    const report = await buildScanReport(scanResponse(), locator, 'warning', false)
+    const report = await buildScanReport({ response: scanResponse(), locator, annotationLevel: 'warning', noPoliciesSelected: false })
     assert.equal(report.violationCount, 1)
     assert.equal(report.annotations.length, 1)
     assert.deepEqual(report.annotations[0], {
@@ -43,7 +43,7 @@ test('puts the due date in the change needed line of the annotation', async () =
   policy.impendingDate = '2026-09-01'
   policy.outdatedDate = '2027-01-01'
   policy.dueDate = '2027-03-01'
-  const report = await buildScanReport(response, foundEverywhere, 'warning', false)
+  const report = await buildScanReport({ response, locator: foundEverywhere, annotationLevel: 'warning', noPoliciesSelected: false })
   assert.match(report.annotations[0]?.message ?? '', /^Change needed: 14 → 16 by 2027-03-01$/m)
 })
 
@@ -52,7 +52,7 @@ test('lists each policy hit under its status in the annotation message', async (
   const response = scanResponse({
     components: [{ address: 'aws_s3_bucket.open', tfType: 'aws_s3_bucket', technology: 'aws-s3-bucket', type: 'aws-s3-bucket', currentVersion: '', policyComponents: policies }],
   })
-  const report = await buildScanReport(response, foundEverywhere, 'warning', false)
+  const report = await buildScanReport({ response, locator: foundEverywhere, annotationLevel: 'warning', noPoliciesSelected: false })
   assert.equal(
     report.annotations[0]?.message,
     [
@@ -75,7 +75,7 @@ test('leads with the no-policies warning and counts incomplete checks', async ()
     },
     coverage: { unmappedResources: [{ address: 'custom_widget.example', reason: 'unknown_technology' }], mergedResources: [], skippedResources: [] },
   })
-  const report = await buildScanReport(response, undefined, 'warning', true)
+  const report = await buildScanReport({ response, annotationLevel: 'warning', noPoliciesSelected: true })
   assert.equal(report.title, 'No policies evaluated')
   assert.equal(report.warningCount, 4)
   assert.match(report.summary, /^> \[!WARNING\]\n> \*\*No policies were evaluated\.\*\* The workflow passes an empty `policy-ids` list\./)
@@ -84,7 +84,11 @@ test('leads with the no-policies warning and counts incomplete checks', async ()
 
 test('keeps 25 resources in the table and collapses the rest, unmapped first', async () => {
   const components = Array.from({ length: 150 }, (_, index) => ({ ...scanResponse().components[0]!, address: `module.application["${index}"].aws_db_instance.primary` }))
-  const report = await buildScanReport(scanResponse({ summary: { managedResourcesInPlan: 150, componentsMapped: 150, hasPolicyViolations: true }, components }), undefined, 'warning', false)
+  const report = await buildScanReport({
+    response: scanResponse({ summary: { managedResourcesInPlan: 150, componentsMapped: 150, hasPolicyViolations: true }, components }),
+    annotationLevel: 'warning',
+    noPoliciesSelected: false,
+  })
   assert.equal(report.title, '150 policy violations on 150 resources')
   assert.match(report.summary, /<details><summary>125 more resources with violations \(125 without a source line\)<\/summary>/)
   assert.ok(report.summary.length <= SUMMARY_BUDGET)
@@ -100,7 +104,7 @@ test('renders every untrusted value as a code span so mentions, links, images, H
     },
     coverage: { unmappedResources: [{ address: `aws_s3_bucket.b["${HOSTILE}"]`, reason: 'unknown_technology' }], mergedResources: [], skippedResources: [] },
   })
-  const report = await buildScanReport(response, undefined, 'warning', false)
+  const report = await buildScanReport({ response, annotationLevel: 'warning', noPoliciesSelected: false })
   const rendered = stripCodeSpans(report.summary)
   for (const fragment of ['@octocat', '[click](', '![x](', '<img', 'pipe', '`']) assert.equal(rendered.includes(fragment), false, fragment)
   for (const row of tableRows(report.summary)) assert.ok([3, 5].includes(cellDelimiters(row)), row)
@@ -108,12 +112,11 @@ test('renders every untrusted value as a code span so mentions, links, images, H
 
 test('caps each rendered value at 200 characters', async () => {
   const long = 'x'.repeat(500)
-  const report = await buildScanReport(
-    scanResponse({ coverage: { unmappedResources: [{ address: long, reason: 'no_version' }], mergedResources: [], skippedResources: [] } }),
-    undefined,
-    'warning',
-    false,
-  )
+  const report = await buildScanReport({
+    response: scanResponse({ coverage: { unmappedResources: [{ address: long, reason: 'no_version' }], mergedResources: [], skippedResources: [] } }),
+    annotationLevel: 'warning',
+    noPoliciesSelected: false,
+  })
   assert.ok(report.summary.includes('x'.repeat(MAX_VALUE_CHARS - 1) + '…'))
   assert.equal(report.summary.includes('x'.repeat(MAX_VALUE_CHARS + 1)), false)
 })
@@ -127,7 +130,11 @@ test('drops row detail instead of cutting a span when a violation row passes the
     policyComponents: [{ policyName: 'p'.repeat(60), status: 'outdated', recommendedVersion: 'w'.repeat(100), dueDate: '2027-01-01' }],
   }
   const locator: SourceLocator = { locate: async () => ({ kind: 'found', location: { path: `${'d'.repeat(150)}/main.tf`, startLine: 12 } }) }
-  const report = await buildScanReport(scanResponse({ components: [component] }), locator, 'warning', false, {
+  const report = await buildScanReport({
+    response: scanResponse({ components: [component] }),
+    locator,
+    annotationLevel: 'warning',
+    noPoliciesSelected: false,
     repository: { owner: 'draftt-io', repo: 'terraform-demo', headSha: '3f9c2a17be0d44a1c9e8f0a6d2b5e7c1a4f60d9b' },
   })
   const row = tableRows(report.summary).find((candidate) => candidate.startsWith(`| \`${'a'.repeat(190)}\``)) ?? ''
@@ -149,7 +156,12 @@ test('caps an annotation message at 60,000 UTF-8 bytes without splitting a chara
   const base = scanResponse().components[0]!
   // Far more bytes than characters: a character cap would let this message through.
   const policyComponents = Array.from({ length: 300 }, (_, index) => ({ policyName: `${index} ${'€'.repeat(199)}`, status: 'outdated' }))
-  const report = await buildScanReport(scanResponse({ components: [{ ...base, policyComponents }] }), foundEverywhere, 'warning', false)
+  const report = await buildScanReport({
+    response: scanResponse({ components: [{ ...base, policyComponents }] }),
+    locator: foundEverywhere,
+    annotationLevel: 'warning',
+    noPoliciesSelected: false,
+  })
   const message = report.annotations[0]?.message ?? ''
   assert.ok(Buffer.byteLength(message) <= 60_000)
   assert.ok(message.endsWith('\n… truncated'))
@@ -197,18 +209,18 @@ test('matches every case of the parity fixture shared with draftt-ci', async () 
         }
       : undefined
     // The service renders the ui-backend-shaped response after parseScanResponse; so does this test.
-    const report = await buildScanReport(
-      parseScanResponse(entry.response),
-      locator,
-      entry.annotationLevel,
-      entry.noPoliciesSelected,
-      entry.repository ? { repository: entry.repository } : {},
-    )
+    const report = await buildScanReport({
+      response: parseScanResponse(entry.response),
+      annotationLevel: entry.annotationLevel,
+      noPoliciesSelected: entry.noPoliciesSelected,
+      ...(locator ? { locator } : {}),
+      ...(entry.repository ? { repository: entry.repository } : {}),
+    })
     assert.deepEqual({ title: report.title, summary: report.summary, annotations: report.annotations }, entry.expected, entry.name)
   }
 })
 
-test('parity pin equals 83f0fc6b…edc5', () => {
+test('parity pin equals f76e76cd…408e', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/parity.json', import.meta.url), 'utf8')) as { sharedBlockSha256: string }
-  assert.equal(fixture.sharedBlockSha256, '83f0fc6ba0f90513181439a02c7f00a318fbc19fed03705985d248301a16edc5')
+  assert.equal(fixture.sharedBlockSha256, 'f76e76cd709fce972f31557005867049dcf1f3dede141b9862282186f6f2408e')
 })
