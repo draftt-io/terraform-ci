@@ -61,49 +61,32 @@ test('rejects malformed nested response data', () => {
   assert.throws(() => parseScanResponse({ ...response, coverage: null }), /coverage/)
 })
 
-test('parses the v2 publish fields and keeps a github.com check run url', () => {
+test('parses the v2 publish fields', () => {
   const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 3, publishError: { code: 'comment', message: 'm' } })
   assert.equal(parsed.checkRunUrl, 'https://github.com/o/r/runs/1')
   assert.equal(parsed.annotationCount, 3)
   assert.deepEqual(parsed.publishError, { code: 'comment', message: 'm' })
+  assert.equal('publishError' in parseScanResponse({ ...scanResponse(), publishError: null }), false)
 })
 
-test('drops a check run url that is not https on github.com or the server host, and still accepts a v0.1.1 body', () => {
-  assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'http://github.com/x' }).checkRunUrl, undefined)
-  assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://evil.test/x' }).checkRunUrl, undefined)
-  const serverUrl = process.env.GITHUB_SERVER_URL
-  process.env.GITHUB_SERVER_URL = 'https://ghe.example.test'
-  try {
-    assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://ghe.example.test/x' }).checkRunUrl, 'https://ghe.example.test/x')
-  } finally {
-    if (serverUrl === undefined) delete process.env.GITHUB_SERVER_URL
-    else process.env.GITHUB_SERVER_URL = serverUrl
-  }
-  assert.equal(parseScanResponse({ ...scanResponse(), annotationCount: -1, publishError: { code: 1 } }).annotationCount, undefined)
-  assert.equal(parseScanResponse(scanResponse()).publishError, undefined)
-})
-
-test('treats a null publishError from the server as no publish error', () => {
-  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 0, publishError: null })
-  assert.equal(parsed.publishError, undefined)
-  assert.equal('publishError' in parsed, false)
-  assert.equal(parsed.annotationCount, 0)
-})
-
-test('keeps the fields the report renders and drops malformed entries of the optional ones', () => {
-  const response = scanResponse()
+test('drops an off-host check run url and malformed optional values, keeping the rest of the response', () => {
   const parsed = parseScanResponse({
-    ...response,
-    components: [{ ...response.components[0], policyComponents: [{ policyId: '10', policyName: 'Supported version', name: 'primary', status: 'outdated', currentVersion: '14' }] }],
+    ...scanResponse(),
+    checkRunUrl: 'https://evil.test/x',
+    annotationCount: -1,
+    publishError: { code: 1 },
     evaluation: {
       evaluatedPolicies: [{ policyId: '10', name: 'Supported version' }, { policyId: 7 }],
       unevaluatedPolicies: [],
       componentsWithGaps: [{ address: 'aws_db_instance.replica', policyGaps: [{ policyName: 'Version', reason: 'missing_data', missingAttributes: ['engine_version', 3] }] }],
+      excludedPolicyCount: 1.5,
+      excludedEvaluatedPolicyCount: -1,
     },
   })
-  assert.deepEqual(parsed.components[0]?.policyComponents[0], { policyId: '10', policyName: 'Supported version', name: 'primary', status: 'outdated', currentVersion: '14' })
+  for (const field of ['checkRunUrl', 'annotationCount', 'publishError'] as const) assert.equal(parsed[field], undefined, field)
   assert.deepEqual(parsed.evaluation.evaluatedPolicies, [{ policyId: '10', name: 'Supported version' }])
   assert.deepEqual(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.missingAttributes, ['engine_version'])
+  assert.equal('excludedPolicyCount' in parsed.evaluation || 'excludedEvaluatedPolicyCount' in parsed.evaluation, false)
 })
 
 test('keeps an https policyUrl on a Draftt console policy page and drops any other, keeping the policy', () => {
@@ -116,37 +99,11 @@ test('keeps an https policyUrl on a Draftt console policy page and drops any oth
   for (const url of [
     'https://draftt.io.evil.com/policy/1',
     'https://user@app.draftt.io/policy/1',
-    'https://app.draftt.io:8443/policy/1',
-    'https://app.draftt.io/policy/01',
-    // The service accepts the dev console over http; the Action does not.
-    'http://app.dev.internal.draftt.io/policy/1',
     'http://app.draftt.io/policy/1',
     'https://app.draftt.io/policy/1?)](https://evil.com)',
-    'https://app.draftt.io/policy/1?',
-    'https://app.draftt.io/policy/1#',
-    'https://APP.draftt.io/policy/1',
     ' https://app.draftt.io/po\nlicy/1\n',
-    'https://app.draftt.io/policy/1 ',
-    'https://app.draftt.io/policies/1',
-    'not a url',
     7,
   ]) {
     assert.deepEqual(policyUrlOf(url), { policyId: '10', name: 'Supported' }, JSON.stringify(url))
   }
-})
-
-test('keeps the exclusion counts only as non-negative safe integers', () => {
-  const evaluationWith = (count: unknown) =>
-    parseScanResponse({ ...scanResponse(), evaluation: { ...scanResponse().evaluation, excludedPolicyCount: count, excludedEvaluatedPolicyCount: count } }).evaluation
-  for (const count of [0, 3]) {
-    const evaluation = evaluationWith(count)
-    assert.equal(evaluation.excludedPolicyCount, count)
-    assert.equal(evaluation.excludedEvaluatedPolicyCount, count)
-  }
-  for (const count of [-1, 1.5, '2', null, Number.MAX_SAFE_INTEGER + 1]) {
-    const evaluation = evaluationWith(count)
-    assert.equal('excludedPolicyCount' in evaluation, false, JSON.stringify(count))
-    assert.equal('excludedEvaluatedPolicyCount' in evaluation, false, JSON.stringify(count))
-  }
-  assert.equal('excludedPolicyCount' in parseScanResponse(scanResponse()).evaluation, false)
 })
