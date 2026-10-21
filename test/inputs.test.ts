@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parsePolicyIds, readInputs, scanKeyFromTerraformRoot } from '../src/inputs.ts'
+import { parsePolicyIds, parsePublishMode, readInputs, scanKeyFromTerraformRoot } from '../src/inputs.ts'
 
 test('parses omitted, selected, and explicitly empty policy ids', () => {
   assert.equal(parsePolicyIds(''), undefined)
@@ -41,9 +41,11 @@ function reader(values: Record<string, string>): { getInput(name: string): strin
 
 test('publish-mode defaults to server, accepts action, rejects others; github-token is optional', () => {
   const base = { 'plan-json': 'p', 'api-url': 'https://x/v1/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-violations': 'false', 'fail-on-scan-error': 'false' }
-  assert.equal(readInputs(reader(base)).publishMode, 'server')
+  assert.equal(parsePublishMode(''), 'server')
+  assert.equal(parsePublishMode('server'), 'server')
+  assert.equal(parsePublishMode('action'), 'action')
   assert.equal(readInputs(reader(base)).githubToken, undefined)
-  assert.equal(readInputs(reader({ ...base, 'publish-mode': 'action', 'github-token': 't' })).publishMode, 'action')
+  assert.equal(readInputs(reader({ ...base, 'publish-mode': 'action', 'github-token': 't' })).githubToken, 't')
   assert.throws(() => readInputs(reader({ ...base, 'publish-mode': 'both' })), /publish-mode must be "server" or "action"/)
 })
 

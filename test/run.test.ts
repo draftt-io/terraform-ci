@@ -68,8 +68,14 @@ class FakePublisher implements CheckPublisherLike {
   readonly completed: Array<{ conclusion: CheckConclusion; title: string; annotations: number }> = []
   failFinish = false
   failCompleted = false
+  readonly events: string[]
+
+  constructor(events: string[]) {
+    this.events = events
+  }
 
   async start(): Promise<void> {
+    this.events.push('start')
     this.starts += 1
     this.checkRunUrl = 'https://github.com/o/r/runs/8'
   }
@@ -115,14 +121,17 @@ function createHarness(options: HarnessOptions = {}): {
   dependencies: ActionDependencies
   runtime: FakeRuntime
   publisher: FakePublisher
+  events: string[]
   calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: AnnotationLevel[]; repositories: Array<ReportRepository | undefined> }
 } {
   const failOnScanError = options.failOnScanError ?? false
   const apiUrl = options.apiUrl ?? 'https://ci.example.test/v1/scans'
   const runtimeInputs: Record<string, string> = { 'api-key': 'draftt-key', 'api-url': apiUrl, 'fail-on-scan-error': String(failOnScanError) }
   if (options.githubToken !== null) runtimeInputs['github-token'] = options.githubToken ?? 'github-token'
+  if (options.publishMode) runtimeInputs['publish-mode'] = options.publishMode
   const runtime = new FakeRuntime(runtimeInputs)
-  const publisher = new FakePublisher()
+  const events: string[] = []
+  const publisher = new FakePublisher(events)
   const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as AnnotationLevel[], repositories: [] as Array<ReportRepository | undefined> }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
@@ -132,7 +141,6 @@ function createHarness(options: HarnessOptions = {}): {
     terraformRoot: options.terraformRoot ?? '.',
     failOnViolations: options.failOnViolations ?? false,
     failOnScanError,
-    publishMode: options.publishMode ?? 'server',
   }
   const plan: SanitizedPlan = { format_version: '1.2', resource_changes: [] }
   const response: ScanResponse = scanResponse()
@@ -154,6 +162,7 @@ function createHarness(options: HarnessOptions = {}): {
   return {
     runtime,
     publisher,
+    events,
     calls,
     dependencies: {
       runtime,
@@ -164,6 +173,7 @@ function createHarness(options: HarnessOptions = {}): {
         return publisher
       },
       readInputs: () => {
+        events.push('readInputs')
         calls.readInputs += 1
         if (options.inputsError) throw options.inputsError
         return inputs
@@ -481,17 +491,23 @@ test('action mode on a PR keeps the v0.1.1 flow: in_progress check first, annota
   assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'action', 'annotation-count': 1 })
 })
 
-test('a bad input concludes the v0.1.1 check with the input error, whatever the publish mode', async () => {
-  for (const options of [{ publishMode: 'action' as const, payload: PR }, { payload: PR }] satisfies HarnessOptions[]) {
-    const h = createHarness({ ...options, inputsError: new Error('policy-ids must be a JSON array of decimal-string ids') })
-    await run(h.dependencies)
-    assert.deepEqual(h.publisher.names, [CHECK_NAME])
-    assert.equal(h.publisher.starts, 1)
-    assert.deepEqual(h.publisher.conclusions, ['neutral'])
-    assert.equal(h.calls.readPlan, 0)
-    assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action', 'check-run-url': 'https://github.com/o/r/runs/8' })
-    assert.ok(h.runtime.warnings.includes('policy-ids must be a JSON array of decimal-string ids'))
-  }
+test('action mode starts the check before reading inputs, so a bad input still concludes it', async () => {
+  const h = createHarness({ publishMode: 'action', payload: PR, inputsError: new Error('policy-ids must be a JSON array of decimal-string ids') })
+  await run(h.dependencies)
+  assert.deepEqual(h.events, ['start', 'readInputs'])
+  assert.deepEqual(h.publisher.conclusions, ['neutral'])
+  assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action' })
+  assert.ok(h.runtime.warnings.includes('policy-ids must be a JSON array of decimal-string ids'))
+})
+
+test('server mode on a PR reports a bad input on the (Action) error check', async () => {
+  const h = createHarness({ payload: PR, inputsError: new Error('policy-ids must be a JSON array of decimal-string ids') })
+  await run(h.dependencies)
+  assert.equal(h.publisher.starts, 0)
+  assert.deepEqual(h.publisher.names, [FALLBACK_CHECK_NAME])
+  assert.deepEqual(h.publisher.completed.map((c) => [c.conclusion, c.title]), [['neutral', 'Terraform policy scan could not complete']])
+  assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action', 'check-run-url': 'https://github.com/o/r/runs/9' })
+  assert.ok(h.runtime.warnings.includes('policy-ids must be a JSON array of decimal-string ids'))
 })
 
 test('action mode requires github-token', async () => {

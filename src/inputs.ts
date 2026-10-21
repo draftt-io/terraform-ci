@@ -12,7 +12,6 @@ export interface ActionInputs {
   // Deprecated and a no-op in every flow: true only prints the deprecation warning.
   failOnViolations: boolean
   failOnScanError: boolean
-  publishMode: PublishMode
 }
 
 export interface InputReader {
@@ -22,20 +21,23 @@ export interface InputReader {
 export function readInputs(core: InputReader): ActionInputs {
   const policyIds = parsePolicyIds(core.getInput('policy-ids'))
   const githubToken = core.getInput('github-token')
-  return {
+  const failOnViolations = parseOptionalBoolean(core.getInput('fail-on-violations'), 'fail-on-violations')
+  const inputs: ActionInputs = {
     planJson: core.getInput('plan-json', { required: true }),
     apiUrl: core.getInput('api-url', { required: true }),
     apiKey: core.getInput('api-key', { required: true }),
     ...(githubToken === '' ? {} : { githubToken }),
     terraformRoot: core.getInput('terraform-root', { required: true }),
     ...(policyIds === undefined ? {} : { policyIds }),
-    failOnViolations: parseOptionalBoolean(core.getInput('fail-on-violations'), 'fail-on-violations'),
+    failOnViolations,
     failOnScanError: parseBoolean(core.getInput('fail-on-scan-error'), 'fail-on-scan-error'),
-    publishMode: parsePublishMode(core.getInput('publish-mode')),
   }
+  // Validated with the other inputs; run reads the mode itself to choose the flow before they are parsed.
+  parsePublishMode(core.getInput('publish-mode'))
+  return inputs
 }
 
-function parsePublishMode(value: string): PublishMode {
+export function parsePublishMode(value: string): PublishMode {
   if (value === '' || value === 'server') return 'server'
   if (value === 'action') return 'action'
   throw new Error('publish-mode must be "server" or "action"')
