@@ -20,6 +20,9 @@ test('ignores response details that do not affect Action behavior', () => {
   const response = scanResponse()
   assert.deepEqual(parseScanResponse({
     ...response,
+    // Earlier servers also sent mode and conclusion.
+    mode: 'blocking',
+    conclusion: 'failure',
     evaluation: {
       ...response.evaluation,
       evaluatedPolicies: 'changed unused shape',
@@ -94,39 +97,6 @@ test('keeps the fields the report renders and drops malformed entries of the opt
   assert.deepEqual(parsed.components[0]?.policyComponents[0], { policyId: '10', policyName: 'Supported version', name: 'primary', status: 'outdated', currentVersion: '14' })
   assert.deepEqual(parsed.evaluation.evaluatedPolicies, [{ policyId: '10', name: 'Supported version' }])
   assert.deepEqual(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.missingAttributes, ['engine_version'])
-})
-
-test('parses mode and conclusion only when they are exactly the known strings', () => {
-  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', mode: 'blocking', conclusion: 'failure' })
-  assert.equal(parsed.mode, 'blocking')
-  assert.equal(parsed.conclusion, 'failure')
-  for (const mode of ['advisory', 'blocking'] as const) assert.equal(parseScanResponse({ ...scanResponse(), mode }).mode, mode)
-  for (const conclusion of ['success', 'neutral', 'failure'] as const) assert.equal(parseScanResponse({ ...scanResponse(), conclusion }).conclusion, conclusion)
-
-  const odd = parseScanResponse({ ...scanResponse(), mode: 'Blocking', conclusion: 'skipped' })
-  assert.equal('mode' in odd, false)
-  assert.equal('conclusion' in odd, false)
-  for (const value of [null, 1, true, {}, 'timed_out', ' failure']) {
-    const parsedValue = parseScanResponse({ ...scanResponse(), mode: value, conclusion: value })
-    assert.equal(parsedValue.mode, undefined)
-    assert.equal(parsedValue.conclusion, undefined)
-  }
-  const old = parseScanResponse(scanResponse())
-  assert.equal('mode' in old, false)
-  assert.equal('conclusion' in old, false)
-})
-
-test('a response without mode is accepted', () => {
-  // The new server sends neither mode nor conclusion; the parser keeps both optional and nothing reads them.
-  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 2, publishError: null })
-  assert.equal(parsed.checkRunUrl, 'https://github.com/o/r/runs/1')
-  assert.equal(parsed.annotationCount, 2)
-  assert.equal('mode' in parsed, false)
-  assert.equal('conclusion' in parsed, false)
-  // The current server still sends conclusion without mode.
-  const withConclusion = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', conclusion: 'neutral' })
-  assert.equal('mode' in withConclusion, false)
-  assert.equal(withConclusion.conclusion, 'neutral')
 })
 
 test('keeps an https policyUrl on a Draftt console policy page and drops any other, keeping the policy', () => {

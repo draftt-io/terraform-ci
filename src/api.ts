@@ -2,6 +2,7 @@ import { gzipSync } from 'node:zlib'
 // GitHub's official toolkit writes the job log.
 import * as core from '@actions/core'
 import { parseScanResponse, type ScanResponse } from './contracts.ts'
+import { isRecord } from './objects.ts'
 
 const TOTAL_TIMEOUT_MS = 8 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 310 * 1000
@@ -125,8 +126,8 @@ async function errorBody(response: Response): Promise<ErrorBody> {
   } catch {
     return {}
   }
-  if (typeof value !== 'object' || value === null) return {}
-  const { code, message } = value as { code?: unknown; message?: unknown }
+  if (!isRecord(value)) return {}
+  const { code, message } = value
   return {
     ...(typeof code === 'string' ? { code } : {}),
     ...(typeof message === 'string' && message.trim() !== '' ? { message: message.replace(/\s+/g, ' ').trim().slice(0, MAX_SERVICE_MESSAGE_CHARS) } : {}),

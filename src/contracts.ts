@@ -50,16 +50,7 @@ export interface ScanResponse {
   checkRunUrl?: string
   annotationCount?: number
   publishError?: { code: string; message: string }
-  // Parsed for compatibility only: earlier servers send mode and conclusion, the current one at most conclusion. Nothing reads them.
-  mode?: ScanMode
-  conclusion?: ServerConclusion
 }
-
-export type ScanMode = 'advisory' | 'blocking'
-export type ServerConclusion = 'success' | 'neutral' | 'failure'
-
-const SCAN_MODES: readonly unknown[] = ['advisory', 'blocking'] satisfies ScanMode[]
-const SERVER_CONCLUSIONS: readonly unknown[] = ['success', 'neutral', 'failure'] satisfies ServerConclusion[]
 
 export function parseScanResponse(value: unknown, options: { serverUrl?: string } = {}): ScanResponse {
   if (!isRecord(value)) invalid('root')
@@ -69,6 +60,8 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
   const components = array(value.components, 'components').map(parseFlaggedComponent)
   const hasPolicyViolations = requireBoolean(summary.hasPolicyViolations, 'summary.hasPolicyViolations')
   if (hasPolicyViolations !== (components.length > 0)) invalid('summary.hasPolicyViolations')
+  const excludedPolicyCount = optionalCount(evaluation.excludedPolicyCount)
+  const excludedEvaluatedPolicyCount = optionalCount(evaluation.excludedEvaluatedPolicyCount)
 
   const parsed: ScanResponse = {
     summary: {
@@ -103,8 +96,8 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
           }),
         }
       }),
-      ...optionalCount('excludedPolicyCount', evaluation.excludedPolicyCount),
-      ...optionalCount('excludedEvaluatedPolicyCount', evaluation.excludedEvaluatedPolicyCount),
+      ...(excludedPolicyCount === undefined ? {} : { excludedPolicyCount }),
+      ...(excludedEvaluatedPolicyCount === undefined ? {} : { excludedEvaluatedPolicyCount }),
     },
     coverage: {
       unmappedResources: array(coverage.unmappedResources, 'coverage.unmappedResources').map((item) => {
@@ -121,21 +114,16 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
 
   const serverHost = safeHost(options.serverUrl ?? process.env.GITHUB_SERVER_URL ?? 'https://github.com')
   const checkRunUrl = typeof value.checkRunUrl === 'string' && isTrustedCheckRunUrl(value.checkRunUrl, serverHost) ? value.checkRunUrl : undefined
-  const annotationCount = Number.isSafeInteger(value.annotationCount) && (value.annotationCount as number) >= 0 ? (value.annotationCount as number) : undefined
+  const annotationCount = optionalCount(value.annotationCount)
   // The server sends publishError: null when publishing succeeded; only a well-formed object is an error.
   const publishError = isRecord(value.publishError) && typeof value.publishError.code === 'string' && typeof value.publishError.message === 'string'
     ? { code: value.publishError.code, message: value.publishError.message }
     : undefined
-  // Only the exact strings count; any other value is treated as absent, never as a malformed response.
-  const mode = SCAN_MODES.includes(value.mode) ? (value.mode as ScanMode) : undefined
-  const conclusion = SERVER_CONCLUSIONS.includes(value.conclusion) ? (value.conclusion as ServerConclusion) : undefined
   return {
     ...parsed,
     ...(checkRunUrl ? { checkRunUrl } : {}),
     ...(annotationCount === undefined ? {} : { annotationCount }),
     ...(publishError ? { publishError } : {}),
-    ...(mode ? { mode } : {}),
-    ...(conclusion ? { conclusion } : {}),
   }
 }
 
@@ -231,9 +219,9 @@ function isTrustedPolicyUrl(value: string): boolean {
   )
 }
 
-// Present only when the server applied a repository's exclusions; anything but a non-negative integer is dropped.
-function optionalCount<K extends string>(key: K, value: unknown): Partial<Record<K, number>> {
-  return Number.isSafeInteger(value) && (value as number) >= 0 ? ({ [key]: value } as Partial<Record<K, number>>) : {}
+// An optional count: anything but a non-negative safe integer is dropped.
+function optionalCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {

@@ -1,3 +1,4 @@
+import { isRecord } from './objects.ts'
 import type { SanitizedPlan } from './plan.ts'
 import type { SourceLocator } from './report.ts'
 import type { SourceMapEntry } from './request.ts'
@@ -18,7 +19,7 @@ export async function buildSourceMap(
   for (const resource of plan.resource_changes) {
     if (resource.mode !== 'managed' || typeof resource.address !== 'string' || Object.hasOwn(sourceMap, resource.address)) continue
     const change = resource.change
-    const actions = typeof change === 'object' && change !== null && Array.isArray((change as { actions?: unknown }).actions) ? ((change as { actions: unknown[] }).actions as string[]) : []
+    const actions = isRecord(change) && Array.isArray(change.actions) ? change.actions.filter((action): action is string => typeof action === 'string') : []
     if (!actions.some((action) => MAPPED_ACTIONS.has(action))) continue
     const mapping = await locator.locate({ address: resource.address })
     if (mapping.kind !== 'found') continue

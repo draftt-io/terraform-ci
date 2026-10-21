@@ -219,7 +219,6 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
     const { body, sourceMapDropped } = dependencies.serializeScanRequest(plan, inputs.policyIds, github)
     if (sourceMapDropped) runtime.warning('The source map was dropped to keep the upload under 50 MiB; findings will remain in the Check summary.')
 
-    // The response's mode and conclusion, which older servers still send, are ignored.
     const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
     const report = await dependencies.buildScanReport(reportInput({
       response,

@@ -37,7 +37,7 @@ void run({
   ),
   buildSourceMap,
   buildGitHubContext,
-  eventPayload: () => context.payload as Record<string, unknown>,
+  eventPayload: () => context.payload,
   env: () => process.env,
   scanTerraformPlan,
   buildScanReport,

@@ -621,8 +621,8 @@ test('server mode sends failOnViolations false in the github block when enforcem
   assert.deepEqual(h.runtime.failures, [])
 })
 
-test('the fallback check concludes neutral for violations, even with a stray blocking mode, and the job passes', async () => {
-  const h = createHarness({ response: { mode: 'blocking', conclusion: 'failure', publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
+test('the fallback check concludes neutral for violations and the job passes', async () => {
+  const h = createHarness({ response: { publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
   await run(h.dependencies)
   assert.deepEqual(h.publisher.names, [FALLBACK_CHECK_NAME])
   assert.deepEqual(h.publisher.completed, [{ conclusion: 'neutral', title: 'One violation', annotations: 1 }])
@@ -743,9 +743,9 @@ function deprecations(runtime: FakeRuntime): string[] {
 
 test('annotation level is warning in every flow, whatever the response or fail-on-violations', async () => {
   const cases: Array<[HarnessOptions, string]> = [
-    [{ response: { mode: 'blocking' }, payload: PR }, 'server fallback, blocking'],
-    [{ response: { mode: 'blocking', checkRunUrl: RUN_URL, conclusion: 'failure' }, failOnViolations: true, payload: PR }, 'server published'],
-    [{ response: {}, failOnViolations: true, payload: PR }, 'server, no mode'],
+    [{ payload: PR }, 'server fallback'],
+    [{ response: { checkRunUrl: RUN_URL }, failOnViolations: true, payload: PR }, 'server published'],
+    [{ failOnViolations: true, payload: PR }, 'server fallback, fail-on-violations true'],
     [{ publishMode: 'action', failOnViolations: true, payload: PR }, 'action mode'],
     [{ failOnViolations: true }, 'push'],
   ]
@@ -758,9 +758,9 @@ test('annotation level is warning in every flow, whatever the response or fail-o
 
 test('fail-on-violations true prints the deprecation line and the job passes', async () => {
   const cases: Array<[HarnessOptions, string]> = [
-    [{ response: { mode: 'blocking', checkRunUrl: RUN_URL, conclusion: 'failure' }, payload: PR }, 'server published, stray failure'],
+    [{ response: { checkRunUrl: RUN_URL }, payload: PR }, 'server published'],
     [{ response: { publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR, report: twoViolationReport() }, 'server fallback'],
-    [{ githubToken: null, response: { mode: 'blocking' }, payload: PR }, 'server, no token'],
+    [{ githubToken: null, payload: PR }, 'server, no token'],
     [{ publishMode: 'action', payload: PR }, 'action mode'],
     [{}, 'push'],
   ]
@@ -791,51 +791,36 @@ test('the deprecation line prints once even when the scan errors, and never for 
   }
 })
 
-test('server mode never fails the job on violations, whatever the response says', async () => {
-  const responses: Array<Partial<ScanResponse>> = [
-    { mode: 'blocking', conclusion: 'failure', checkRunUrl: RUN_URL },
-    { mode: 'advisory', conclusion: 'failure', checkRunUrl: RUN_URL },
-    { checkRunUrl: RUN_URL },
-    { mode: 'blocking' },
-    {},
-  ]
+test('server mode never fails the job on violations', async () => {
+  const responses: Array<Partial<ScanResponse>> = [{ checkRunUrl: RUN_URL }, {}]
   for (const response of responses) {
     const h = createHarness({ response, payload: PR, report: twoViolationReport() })
     await run(h.dependencies)
     assert.deepEqual(h.runtime.failures, [], JSON.stringify(response))
   }
-  const noToken = createHarness({ githubToken: null, response: { mode: 'blocking' }, payload: PR })
+  const noToken = createHarness({ githubToken: null, payload: PR })
   await run(noToken.dependencies)
   assert.deepEqual(noToken.runtime.failures, [])
 })
 
 test('without a published check the fallback check is neutral with violations and success without', async () => {
-  const violations = createHarness({ response: { mode: 'blocking' }, payload: PR, report: twoViolationReport() })
+  const violations = createHarness({ payload: PR, report: twoViolationReport() })
   await run(violations.dependencies)
   assert.deepEqual(violations.publisher.completed.map((c) => c.conclusion), ['neutral'])
 
-  const clean = createHarness({ response: { mode: 'blocking' }, payload: PR, report: { title: 'No policy violations found', summary: 'S', annotations: [], violationCount: 0, warningCount: 0 } })
+  const clean = createHarness({ payload: PR, report: { title: 'No policy violations found', summary: 'S', annotations: [], violationCount: 0, warningCount: 0 } })
   await run(clean.dependencies)
   assert.deepEqual(clean.publisher.completed.map((c) => c.conclusion), ['success'])
   assert.deepEqual(clean.runtime.failures, [])
 })
 
-test('a response without mode is accepted and logs no mode line', async () => {
-  for (const response of [{ checkRunUrl: RUN_URL, annotationCount: 4 }, {}, { publishError: { code: 'not_bound', message: 'no binding' } }] satisfies Array<Partial<ScanResponse>>) {
-    const h = createHarness({ response, payload: PR })
-    await run(h.dependencies)
-    assertOutputFields(h.runtime, { 'scan-status': 'completed' })
-    assert.equal(h.runtime.infos.some((line) => line.includes('mode') && !line.startsWith('Draftt scan: publish-mode')), false, JSON.stringify(h.runtime.infos))
-  }
-})
-
 test('no published-check warning about the required Draftt check and no mode in the completion line', async () => {
-  const h = createHarness({ response: { mode: 'blocking', publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
+  const h = createHarness({ response: { publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
   await run(h.dependencies)
   assert.equal(h.runtime.warnings.some((w) => w.includes('required Draftt check')), false)
   assert.equal(h.runtime.infos.at(-1), 'Draftt scan completed (violations 1, warnings 2, annotations 1); check published by action: https://github.com/o/r/runs/9')
 
-  const published = createHarness({ response: { mode: 'advisory', checkRunUrl: RUN_URL, annotationCount: 4, conclusion: 'neutral' }, payload: PR })
+  const published = createHarness({ response: { checkRunUrl: RUN_URL, annotationCount: 4 }, payload: PR })
   await run(published.dependencies)
   assert.equal(published.runtime.infos.at(-1), `Draftt scan completed (violations 1, warnings 2, annotations 4); check published by server: ${RUN_URL}`)
 })
