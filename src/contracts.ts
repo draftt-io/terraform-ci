@@ -53,13 +53,13 @@ export interface ScanResponse {
 }
 
 export function parseScanResponse(value: unknown): ScanResponse {
-  if (!isRecord(value)) invalid('root')
-  const summary = record(value.summary, 'summary')
-  const evaluation = record(value.evaluation, 'evaluation')
-  const coverage = record(value.coverage, 'coverage')
+  if (!isRecord(value)) throw invalidResponseError('root')
+  const summary = requireObject(value.summary, 'summary')
+  const evaluation = requireObject(value.evaluation, 'evaluation')
+  const coverage = requireObject(value.coverage, 'coverage')
   const components = array(value.components, 'components').map(parseFlaggedComponent)
   const hasPolicyViolations = requireBoolean(summary.hasPolicyViolations, 'summary.hasPolicyViolations')
-  if (hasPolicyViolations !== (components.length > 0)) invalid('summary.hasPolicyViolations')
+  if (hasPolicyViolations !== (components.length > 0)) throw invalidResponseError('summary.hasPolicyViolations')
   const excludedPolicyCount = optionalCount(evaluation.excludedPolicyCount)
   const excludedEvaluatedPolicyCount = optionalCount(evaluation.excludedEvaluatedPolicyCount)
 
@@ -73,7 +73,7 @@ export function parseScanResponse(value: unknown): ScanResponse {
     evaluation: {
       ...optionalEvaluatedPolicies(evaluation.evaluatedPolicies),
       unevaluatedPolicies: array(evaluation.unevaluatedPolicies, 'evaluation.unevaluatedPolicies').map((item, index) => {
-        const policy = record(item, `evaluation.unevaluatedPolicies.${index}`)
+        const policy = requireObject(item, `evaluation.unevaluatedPolicies.${index}`)
         return {
           policyId: requireString(policy.policyId, 'policyId'),
           ...(typeof policy.name === 'string' ? { name: policy.name } : {}),
@@ -81,11 +81,11 @@ export function parseScanResponse(value: unknown): ScanResponse {
         }
       }),
       componentsWithGaps: array(evaluation.componentsWithGaps, 'evaluation.componentsWithGaps').map((item, index) => {
-        const component = record(item, `evaluation.componentsWithGaps.${index}`)
+        const component = requireObject(item, `evaluation.componentsWithGaps.${index}`)
         return {
           address: requireString(component.address, 'address'),
           policyGaps: array(component.policyGaps, 'policyGaps').map((gapValue) => {
-            const gap = record(gapValue, 'policyGap')
+            const gap = requireObject(gapValue, 'policyGap')
             return {
               policyName: requireString(gap.policyName, 'policyName'),
               reason: requireString(gap.reason, 'reason'),
@@ -101,7 +101,7 @@ export function parseScanResponse(value: unknown): ScanResponse {
     },
     coverage: {
       unmappedResources: array(coverage.unmappedResources, 'coverage.unmappedResources').map((item) => {
-        const resource = record(item, 'unmappedResource')
+        const resource = requireObject(item, 'unmappedResource')
         return {
           address: requireString(resource.address, 'address'),
           reason: requireString(resource.reason, 'reason'),
@@ -145,7 +145,7 @@ function isTrustedCheckRunUrl(value: string, serverHost: string | undefined): bo
 }
 
 function parseFlaggedComponent(value: unknown, index: number): FlaggedComponent {
-  const component = record(value, `components.${index}`)
+  const component = requireObject(value, `components.${index}`)
   return {
     address: requireString(component.address, 'address'),
     ...(typeof component.sourceAddress === 'string' ? { sourceAddress: component.sourceAddress } : {}),
@@ -154,7 +154,7 @@ function parseFlaggedComponent(value: unknown, index: number): FlaggedComponent 
     type: requireString(component.type, 'type'),
     currentVersion: requireString(component.currentVersion, 'currentVersion'),
     policyComponents: array(component.policyComponents, 'policyComponents').map((item) => {
-      const policy = record(item, 'policyComponent')
+      const policy = requireObject(item, 'policyComponent')
       return {
         ...(typeof policy.policyId === 'string' ? { policyId: policy.policyId } : {}),
         policyName: requireString(policy.policyName, 'policyName'),
@@ -224,22 +224,22 @@ function optionalCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
-function record(value: unknown, field: string): Record<string, unknown> {
-  if (!isRecord(value)) invalid(field)
+function requireObject(value: unknown, field: string): Record<string, unknown> {
+  if (!isRecord(value)) throw invalidResponseError(field)
   return value
 }
 
 function array(value: unknown, field: string): unknown[] {
-  if (!Array.isArray(value)) invalid(field)
+  if (!Array.isArray(value)) throw invalidResponseError(field)
   return value
 }
 
 function nonNegativeInteger(value: unknown, field: string): number {
   const number = requireNumber(value, field)
-  if (!Number.isInteger(number) || number < 0) invalid(field)
+  if (!Number.isInteger(number) || number < 0) throw invalidResponseError(field)
   return number
 }
 
-function invalid(field: string): never {
-  throw new Error(`Invalid API response: ${field}`)
+function invalidResponseError(field: string): Error {
+  return new Error(`Invalid API response: ${field}`)
 }
