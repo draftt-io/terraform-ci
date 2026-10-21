@@ -229,18 +229,22 @@ export function serializeScanRequest(
   const planJson = JSON.stringify(plan)
   if (Buffer.byteLength(planJson) > MAX_PLAN_BYTES) throw new Error(PLAN_TOO_LARGE)
   const ids = policyIds === undefined ? '' : `,"policyIds":${JSON.stringify(policyIds)}`
-  const serialize = (context: GitHubScanContext | undefined): string =>
-    `{"plan":${planJson}${ids}${context ? `,"github":${JSON.stringify(context)}` : ''}}`
-  let body = serialize(github)
+  let body = serializeRequestBody({ planJson, ids, github })
   let sourceMapDropped = false
   // The source map is optional enrichment: drop it before giving up on an oversized request.
   if (Buffer.byteLength(body) > MAX_REQUEST_BYTES && github?.sourceMap) {
     const { sourceMap: _dropped, ...withoutMap } = github
-    body = serialize(withoutMap)
+    body = serializeRequestBody({ planJson, ids, github: withoutMap })
     sourceMapDropped = true
   }
   if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error('Scrubbed scan request exceeds the 50 MiB request limit')
   return { body, sourceMapDropped }
+}
+
+// planJson is already serialized and ids is the ready `,"policyIds":[...]` fragment, or ''.
+function serializeRequestBody(input: { planJson: string; ids: string; github: GitHubScanContext | undefined }): string {
+  const { planJson, ids, github } = input
+  return `{"plan":${planJson}${ids}${github ? `,"github":${JSON.stringify(github)}` : ''}}`
 }
 
 function projectResourceChange(resource: Record<string, unknown>): RetainedResource {

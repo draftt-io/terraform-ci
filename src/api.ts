@@ -1,5 +1,4 @@
 import { gzipSync } from 'node:zlib'
-// GitHub's official toolkit writes the job log.
 import * as core from '@actions/core'
 import { parseScanResponse, type ScanResponse } from './contracts.ts'
 import { isRecord } from './objects.ts'
@@ -12,6 +11,7 @@ const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
 const GZIP_THRESHOLD_BYTES = 1024 * 1024
 const MAX_RETRY_AFTER_MS = 60_000
 
+// The status and the service's code let the caller tell owner_mismatch, upload_timeout and too_many_scan_keys apart; the Action has no OpError.
 export class ScanRequestFailure extends Error {
   readonly status: number | undefined
   readonly code: string | undefined
@@ -112,7 +112,9 @@ export async function scanTerraformPlan(
 // codes and the service message. Any other status's body is never read, so never echoed.
 const BODY_READ_STATUS = new Set([403, 408, 422])
 const MAX_SERVICE_MESSAGE_CHARS = 300
-const TOO_MANY_SCAN_KEYS = 'This commit already has 50 Draftt CI scans, the most Draftt CI accepts per commit (one per terraform-root).'
+// The server's limit of scan keys per commit, which its 422 too_many_scan_keys enforces.
+const MAX_SCANS_PER_COMMIT = 50
+const TOO_MANY_SCAN_KEYS = `This commit already has ${MAX_SCANS_PER_COMMIT} Draftt CI scans, the most Draftt CI accepts per commit (one per terraform-root).`
 
 interface ErrorBody {
   code?: string

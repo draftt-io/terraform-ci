@@ -4,7 +4,7 @@ import { context } from '@actions/github'
 import { scanTerraformPlan } from './api.ts'
 import { CheckPublisher, getHeadSha, isExternalFork } from './github-check.ts'
 import { readInputs } from './inputs.ts'
-import { completedConclusion, scanErrorConclusion } from './outcome.ts'
+import { scanErrorConclusion, violationConclusion } from './outcome.ts'
 import { readAndSanitizePlan, serializeScanRequest } from './plan.ts'
 import { buildScanReport } from './report.ts'
 import { buildGitHubContext } from './request.ts'
@@ -27,7 +27,7 @@ void run({
   },
   isExternalFork,
   getHeadSha,
-  createPublisher: (token, headSha, name) => new CheckPublisher(token, headSha, name),
+  createPublisher: (input) => new CheckPublisher(input),
   readInputs,
   readAndSanitizePlan,
   serializeScanRequest,
@@ -41,7 +41,7 @@ void run({
   env: () => process.env,
   scanTerraformPlan,
   buildScanReport,
-  completedConclusion,
+  violationConclusion,
   scanErrorConclusion,
   workspaceRoot: () => process.env.GITHUB_WORKSPACE ?? process.cwd(),
 })

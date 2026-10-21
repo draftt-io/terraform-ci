@@ -1,8 +1,7 @@
 import { isScansEndpoint } from './api.ts'
 import type { ScanResponse } from './contracts.ts'
-import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckConclusion } from './github-check.ts'
+import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckCompletion, type CheckConclusion, type CheckPublisherInput } from './github-check.ts'
 import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
-import { fallbackConclusion } from './outcome.ts'
 import type { SanitizedPlan } from './plan.ts'
 import type { BuildScanReportInput, ReportRepository, ScanReport, SourceLocator } from './report.ts'
 import { repositoryFromPayload, type GitHubScanContext, type SourceMapEntry } from './request.ts'
@@ -38,15 +37,15 @@ export interface CheckPublisherLike {
   readonly checkRunUrl: string | undefined
   start(): Promise<void>
   publishAnnotations(annotations: CheckAnnotation[]): Promise<void>
-  finish(conclusion: CheckConclusion, title: string, summary: string): Promise<void>
-  publishCompleted(conclusion: CheckConclusion, title: string, summary: string, annotations: CheckAnnotation[]): Promise<void>
+  finish(input: CheckCompletion): Promise<void>
+  publishCompleted(input: CheckCompletion & { annotations: CheckAnnotation[] }): Promise<void>
 }
 
 export interface ActionDependencies {
   runtime: ActionRuntime
   isExternalFork(): boolean
   getHeadSha(): string
-  createPublisher(token: string, headSha?: string, name?: string): CheckPublisherLike
+  createPublisher(input: CheckPublisherInput): CheckPublisherLike
   readInputs(runtime: InputReader): ActionInputs
   readAndSanitizePlan(planPath: string, workspaceRoot: string): Promise<SanitizedPlan>
   serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined, github?: GitHubScanContext): { body: string; sourceMapDropped: boolean }
@@ -58,7 +57,7 @@ export interface ActionDependencies {
   env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
   buildScanReport(input: BuildScanReportInput): Promise<ScanReport>
-  completedConclusion(violationCount: number): CheckConclusion
+  violationConclusion(violationCount: number): CheckConclusion
   scanErrorConclusion(failOnScanError: boolean): CheckConclusion
   workspaceRoot(): string
 }
@@ -107,7 +106,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     const githubToken = runtime.getInput('github-token', { required: true })
     runtime.setSecret(githubToken)
     const headSha = dependencies.getHeadSha()
-    publisher = dependencies.createPublisher(githubToken, headSha, CHECK_NAME)
+    publisher = dependencies.createPublisher({ token: githubToken, headSha, name: CHECK_NAME })
     await publisher.start()
 
     const inputs = dependencies.readInputs(runtime)
@@ -131,8 +130,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     warningCount = report.warningCount
 
     await publisher.publishAnnotations(report.annotations)
-    const conclusion = dependencies.completedConclusion(report.violationCount)
-    await publisher.finish(conclusion, report.title, report.summary)
+    await publisher.finish({ conclusion: dependencies.violationConclusion(report.violationCount), title: report.title, summary: report.summary })
     await writeWorkflowSummary(runtime, report.summary)
     const outputs: Outputs = {
       status: 'completed',
@@ -149,7 +147,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
     let concluded = false
     if (publisher) {
       try {
-        await publisher.finish(dependencies.scanErrorConclusion(failOnScanError), ERROR_TITLE, errorSummary(message))
+        await publisher.finish({ conclusion: dependencies.scanErrorConclusion(failOnScanError), title: ERROR_TITLE, summary: errorSummary(message) })
         concluded = true
         runtime.info(`Posted the error check: ${publisher.checkRunUrl ?? ''}`)
       } catch {
@@ -237,8 +235,13 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       if (response.publishError) runtime.warning(`Draftt CI could not publish the check (${response.publishError.code}): ${response.publishError.message}`)
       if (inputs.githubToken) {
         try {
-          const fallback = dependencies.createPublisher(inputs.githubToken, headSha, FALLBACK_CHECK_NAME)
-          await fallback.publishCompleted(fallbackConclusion(report.violationCount), report.title, report.summary, report.annotations)
+          const fallback = dependencies.createPublisher({ token: inputs.githubToken, headSha, name: FALLBACK_CHECK_NAME })
+          await fallback.publishCompleted({
+            conclusion: dependencies.violationConclusion(report.violationCount),
+            title: report.title,
+            summary: report.summary,
+            annotations: report.annotations,
+          })
           outputs = { ...outputs, annotations: fallback.annotationCount, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
           runtime.info(`Posted the fallback check: ${outputs.checkRunUrl}`)
         } catch {
@@ -257,8 +260,8 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
     let outputs: Outputs = { status: 'error', violations: violationCount, warnings: warningCount, annotations: 0, checkRunUrl: '', publisher: 'none' }
     if (githubToken) {
       try {
-        const fallback = dependencies.createPublisher(githubToken, headSha, FALLBACK_CHECK_NAME)
-        await fallback.publishCompleted(dependencies.scanErrorConclusion(failOnScanError), ERROR_TITLE, errorSummary(message), [])
+        const fallback = dependencies.createPublisher({ token: githubToken, headSha, name: FALLBACK_CHECK_NAME })
+        await fallback.publishCompleted({ conclusion: dependencies.scanErrorConclusion(failOnScanError), title: ERROR_TITLE, summary: errorSummary(message), annotations: [] })
         outputs = { ...outputs, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
         runtime.info(`Posted the error check: ${outputs.checkRunUrl}`)
       } catch {
@@ -352,9 +355,9 @@ async function skipExternalFork(dependencies: ActionDependencies): Promise<void>
   const githubToken = runtime.getInput('github-token')
   if (githubToken) {
     try {
-      const publisher = dependencies.createPublisher(githubToken)
+      const publisher = dependencies.createPublisher({ token: githubToken })
       await publisher.start()
-      await publisher.finish('skipped', 'Terraform policy scan skipped', summary)
+      await publisher.finish({ conclusion: 'skipped', title: 'Terraform policy scan skipped', summary })
     } catch {
       runtime.info('A skipped Check Run could not be published for this fork pull request.')
     }

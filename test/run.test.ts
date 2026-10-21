@@ -3,9 +3,9 @@ import test from 'node:test'
 import type { ScanResponse } from '../src/contracts.ts'
 import { ScanRequestFailure, scanTerraformPlan } from '../src/api.ts'
 import { CHECK_NAME, FALLBACK_CHECK_NAME } from '../src/github-check.ts'
-import type { AnnotationLevel, CheckAnnotation, CheckConclusion } from '../src/github-check.ts'
+import type { AnnotationLevel, CheckAnnotation, CheckCompletion, CheckConclusion } from '../src/github-check.ts'
 import type { ActionInputs } from '../src/inputs.ts'
-import { completedConclusion, scanErrorConclusion } from '../src/outcome.ts'
+import { scanErrorConclusion, violationConclusion } from '../src/outcome.ts'
 import type { SanitizedPlan } from '../src/plan.ts'
 import type { GitHubScanContext } from '../src/request.ts'
 import type { ReportRepository, ScanReport } from '../src/report.ts'
@@ -84,12 +84,12 @@ class FakePublisher implements CheckPublisherLike {
     this.annotationCount += annotations.length
   }
 
-  async finish(conclusion: CheckConclusion): Promise<void> {
+  async finish({ conclusion }: CheckCompletion): Promise<void> {
     if (this.failFinish) throw new Error('GitHub finish failed')
     this.conclusions.push(conclusion)
   }
 
-  async publishCompleted(conclusion: CheckConclusion, title: string, _summary: string, annotations: CheckAnnotation[]): Promise<void> {
+  async publishCompleted({ conclusion, title, annotations }: CheckCompletion & { annotations: CheckAnnotation[] }): Promise<void> {
     if (this.failCompleted) throw new Error('GitHub create failed')
     this.completed.push({ conclusion, title, annotations: annotations.length })
     this.annotationCount += annotations.length
@@ -172,7 +172,7 @@ function createHarness(options: HarnessOptions = {}): {
       runtime,
       isExternalFork: () => options.externalFork ?? false,
       getHeadSha: () => '1111111111111111111111111111111111111111',
-      createPublisher: (_token, _headSha, name) => {
+      createPublisher: ({ name }) => {
         publisher.names.push(name ?? 'default')
         return publisher
       },
@@ -226,7 +226,7 @@ function createHarness(options: HarnessOptions = {}): {
         calls.repositories.push(repository)
         return report
       },
-      completedConclusion,
+      violationConclusion,
       scanErrorConclusion,
       workspaceRoot: () => '/workspace',
     },

@@ -18,6 +18,18 @@ export interface CheckAnnotation {
   title: string
 }
 
+export interface CheckPublisherInput {
+  token: string
+  headSha?: string
+  name?: string
+}
+
+export interface CheckCompletion {
+  conclusion: CheckConclusion
+  title: string
+  summary: string
+}
+
 export class CheckPublisher {
   readonly #octokit: ReturnType<typeof getOctokit>
   readonly #owner: string
@@ -28,7 +40,8 @@ export class CheckPublisher {
   #checkRunUrl: string | undefined
   #publishedAnnotations = 0
 
-  constructor(token: string, headSha = getHeadSha(), name = CHECK_NAME) {
+  constructor(input: CheckPublisherInput) {
+    const { token, headSha = getHeadSha(), name = CHECK_NAME } = input
     this.#octokit = getOctokit(token)
     const repository = context.repo
     this.#owner = repository.owner
@@ -79,7 +92,8 @@ export class CheckPublisher {
     }
   }
 
-  async finish(conclusion: CheckConclusion, title: string, summary: string): Promise<void> {
+  async finish(input: CheckCompletion): Promise<void> {
+    const { conclusion, title, summary } = input
     await this.#octokit.rest.checks.update({
       owner: this.#owner,
       repo: this.#repo,
@@ -95,7 +109,8 @@ export class CheckPublisher {
   // annotation batches repeat the same title and summary. The check already carries its conclusion,
   // so a rejected later batch stops the rest with one warning and annotationCount stays what GitHub
   // accepted.
-  async publishCompleted(conclusion: CheckConclusion, title: string, summary: string, annotations: CheckAnnotation[]): Promise<void> {
+  async publishCompleted(input: CheckCompletion & { annotations: CheckAnnotation[] }): Promise<void> {
+    const { conclusion, title, summary, annotations } = input
     const [first = [], ...rest] = annotationBatches(annotations)
     const now = new Date().toISOString()
     const response = await this.#octokit.rest.checks.create({

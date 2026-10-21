@@ -60,8 +60,8 @@ function annotations(count: number): CheckAnnotation[] {
 
 test('publishCompleted creates one completed check under its name, then sends the remaining annotation batches', async () => {
   requests.length = 0
-  const publisher = new CheckPublisher('token', 'a'.repeat(40), FALLBACK_CHECK_NAME)
-  await publisher.publishCompleted('failure', 'One violation', 'Summary', annotations(51))
+  const publisher = new CheckPublisher({ token: 'token', headSha: 'a'.repeat(40), name: FALLBACK_CHECK_NAME })
+  await publisher.publishCompleted({ conclusion: 'failure', title: 'One violation', summary: 'Summary', annotations: annotations(51) })
 
   assert.deepEqual(requests.map((r) => [r.method, r.url]), [['POST', '/repos/o/r/check-runs'], ['PATCH', '/repos/o/r/check-runs/77']])
   const [create, update] = requests
@@ -81,14 +81,14 @@ test('publishCompleted creates one completed check under its name, then sends th
 
 test('publishCompleted with no annotations is a single create, and start keeps the in-progress v0.1.1 shape', async () => {
   requests.length = 0
-  const errorCheck = new CheckPublisher('token', 'b'.repeat(40), FALLBACK_CHECK_NAME)
-  await errorCheck.publishCompleted('neutral', 'Terraform policy scan could not complete', 'Error', [])
+  const errorCheck = new CheckPublisher({ token: 'token', headSha: 'b'.repeat(40), name: FALLBACK_CHECK_NAME })
+  await errorCheck.publishCompleted({ conclusion: 'neutral', title: 'Terraform policy scan could not complete', summary: 'Error', annotations: [] })
   assert.equal(requests.length, 1)
   assert.deepEqual((requests[0]?.body.output as { annotations: unknown[] }).annotations, [])
   assert.equal(errorCheck.annotationCount, 0)
 
   requests.length = 0
-  const legacy = new CheckPublisher('token', 'c'.repeat(40))
+  const legacy = new CheckPublisher({ token: 'token', headSha: 'c'.repeat(40) })
   await legacy.start()
   assert.equal(requests[0]?.body.name, 'Draftt Terraform Policy Scan')
   assert.equal(requests[0]?.body.status, 'in_progress')
@@ -99,8 +99,8 @@ test('a fallback publish whose second annotation batch rejects reports only the 
   requests.length = 0
   rejectPatchFrom = 1
   try {
-    const publisher = new CheckPublisher('token', 'd'.repeat(40), FALLBACK_CHECK_NAME)
-    await publisher.publishCompleted('failure', 'Violations', 'Summary', annotations(120))
+    const publisher = new CheckPublisher({ token: 'token', headSha: 'd'.repeat(40), name: FALLBACK_CHECK_NAME })
+    await publisher.publishCompleted({ conclusion: 'failure', title: 'Violations', summary: 'Summary', annotations: annotations(120) })
     assert.equal(publisher.annotationCount, 50)
     assert.equal(publisher.checkRunUrl, 'https://github.com/o/r/runs/77')
     // The third batch is not attempted once the second was rejected.
