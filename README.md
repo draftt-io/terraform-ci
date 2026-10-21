@@ -84,7 +84,7 @@ Outputs contain counts and the check URL only, never plan data, policy details, 
 
 ## Requests and errors
 
-Requests over 1 MiB are gzip-compressed. `429`, `502`, `503`, `504` and network failures are retried up to 3 attempts; a `429` waits for `Retry-After` (at most 60 s). Other statuses are final. On a `408` or `422` the service's message is the scan error; every other failure is reported by status, and its body is never read.
+Requests over 1 MiB are gzip-compressed. `5xx` answers and network failures are retried up to 3 attempts, waiting 0.5 s then 1 s. Other statuses are final. On a `401`, `403`, `413` or `422` the service's message (for example `owner_mismatch` or `too_many_scan_keys`) is part of the scan error; every other failure is reported by status, and its body is never read.
 
 ## Plan security
 
@@ -96,7 +96,7 @@ The API key belongs to the Draftt organization: a workflow in any repository tha
 
 ## Logs
 
-The job log shows the `api-url` host (never its path or query) and the scan key, each retry wait (for example `Draftt answered 429, retrying in 30 s (attempt 2 of 3)`), any publish error the App reported, and on completion the violation, warning and annotation counts and the check URL. The API key, plan values and Draftt response bodies are never logged, except the service's message on a `408` or `422`.
+The job log shows the `api-url` host (never its path or query) and the scan key, each retry wait (for example `Draftt answered 502, retrying in 0.5 s (attempt 2 of 3)`), any publish error the App reported, and on completion the violation, warning and annotation counts and the check URL. The API key, plan values and Draftt response bodies are never logged, except the service's message on a `401`, `403`, `413` or `422`.
 
 ## Development
 

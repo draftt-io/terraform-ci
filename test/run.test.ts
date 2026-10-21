@@ -230,20 +230,19 @@ function realScanClient(): ActionDependencies['scanTerraformPlan'] {
   return (apiUrl, apiKey, body) => scanTerraformPlan(apiUrl, apiKey, body, { sleep: async () => {} })
 }
 
-function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-test('each HTTP failure, with fail-on-scan-error, fails the job with its user message; only 429 and 502 are retried', async (t) => {
+test('each HTTP failure, with fail-on-scan-error, fails the job with its user message; only 5xx is retried', async (t) => {
   const cases = [
-    { status: 403, body: { message: 'bound elsewhere' }, attempts: 1, message: 'Draftt refused the scan: the API key is not allowed, or Draftt CI is bound to a different GitHub organization' },
-    { status: 408, body: { message: 'The upload did not finish within 240 s; send the body gzip-compressed' }, attempts: 1, message: 'The upload did not finish within 240 s; send the body gzip-compressed' },
-    { status: 422, body: { message: 'This commit already has 50 Draftt scan keys' }, attempts: 1, message: 'This commit already has 50 Draftt scan keys' },
-    { status: 429, body: { message: 'slow down' }, attempts: 3, message: 'Draftt rate limited the scan request' },
-    { status: 502, body: { message: 'dependency failed' }, attempts: 3, message: 'Draftt could not complete the scan' },
+    { status: 403, body: { status: 403, message: 'owner_mismatch' }, attempts: 1, message: 'Draftt answered 403: owner_mismatch' },
+    { status: 413, body: { status: 413, message: 'payload_too_large: plan' }, attempts: 1, message: 'Draftt answered 413: payload_too_large: plan' },
+    { status: 422, body: { status: 422, message: 'too_many_scan_keys' }, attempts: 1, message: 'Draftt answered 422: too_many_scan_keys' },
+    { status: 500, body: { status: 500, message: 'internal error' }, attempts: 3, message: 'Draftt could not complete the scan' },
   ]
   for (const item of cases) {
-    const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(item.status, item.body, { 'retry-after': '0' }))
+    const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(item.status, item.body))
     const h = createHarness({ failOnScanError: true, payload: PR })
     h.dependencies.scanTerraformPlan = realScanClient()
     await run(h.dependencies)

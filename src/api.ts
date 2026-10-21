@@ -6,19 +6,7 @@ import { isRecord } from './objects.ts'
 const TOTAL_TIMEOUT_MS = 8 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 310 * 1000
 const MAX_ATTEMPTS = 3
-const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
-
 const GZIP_THRESHOLD_BYTES = 1024 * 1024
-const MAX_RETRY_AFTER_MS = 60_000
-
-// Retry-After as delta-seconds or an HTTP date, capped so one answer cannot stall the job.
-export function retryAfterMs(value: string | null): number | undefined {
-  if (value === null || value.trim() === '') return undefined
-  const seconds = Number(value)
-  const milliseconds = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now()
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) return undefined
-  return Math.min(milliseconds, MAX_RETRY_AFTER_MS)
-}
 
 export async function scanTerraformPlan(
   apiUrl: string,
@@ -33,7 +21,6 @@ export async function scanTerraformPlan(
   const payload = compress ? gzipSync(body) : body
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    let retryDelay = attempt * 500
     // Only the status or a fixed failure kind is logged, never the backend body or the error detail.
     let retryReason = 'Draftt request failed'
     const remaining = deadline - Date.now()
@@ -61,10 +48,9 @@ export async function scanTerraformPlan(
       }
 
       const serviceMessage = BODY_READ_STATUS.has(response.status) ? await errorMessageOf(response) : undefined
-      if (response.status === 429) retryDelay = retryAfterMs(response.headers.get('retry-after')) ?? retryDelay
       lastFailure = publicStatusMessage(response.status, serviceMessage)
       retryReason = `Draftt answered ${response.status}`
-      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
+      if (response.status < 500 || attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
     } catch (error) {
       if (error instanceof Error && !isRetryableNetworkError(error)) throw error
       const timedOut = error instanceof Error && error.name === 'TimeoutError'
@@ -72,16 +58,16 @@ export async function scanTerraformPlan(
       retryReason = timedOut ? 'Draftt request timed out' : 'Draftt request failed'
       if (attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
     }
-    const wait = Math.min(retryDelay, Math.max(0, deadline - Date.now()))
+    const wait = Math.min(attempt * 500, Math.max(0, deadline - Date.now()))
     core.info(`${retryReason}, retrying in ${Math.round(wait / 100) / 10} s (attempt ${attempt + 1} of ${MAX_ATTEMPTS})`)
     await (options.sleep ?? delay)(wait)
   }
   throw new Error(lastFailure)
 }
 
-// Error bodies are read only for these statuses, whose service message (for example the 408 upload timeout or
-// the 422 limit of scans per commit) is the scan error. Any other status's body is never read, so never echoed.
-const BODY_READ_STATUS = new Set([408, 422])
+// Error bodies are read only for these statuses, whose service message names the reason (for example
+// owner_mismatch or too_many_scan_keys). Any other status's body is never read, so never echoed.
+const BODY_READ_STATUS = new Set([401, 403, 413, 422])
 const MAX_SERVICE_MESSAGE_CHARS = 300
 
 async function errorMessageOf(response: Response): Promise<string | undefined> {
@@ -96,12 +82,11 @@ async function errorMessageOf(response: Response): Promise<string | undefined> {
 }
 
 function publicStatusMessage(status: number, serviceMessage: string | undefined): string {
-  if (serviceMessage !== undefined) return serviceMessage
+  if (serviceMessage !== undefined) return `Draftt answered ${status}: ${serviceMessage}`
   if (status === 400) return 'Draftt rejected the scan request'
   if (status === 401) return 'Draftt authentication failed'
   if (status === 403) return 'Draftt refused the scan: the API key is not allowed, or Draftt CI is bound to a different GitHub organization'
   if (status === 413) return 'Draftt rejected the scan request as too large'
-  if (status === 429) return 'Draftt rate limited the scan request'
   if (status >= 500) return 'Draftt could not complete the scan'
   return `Draftt scan request failed with HTTP ${status}`
 }
