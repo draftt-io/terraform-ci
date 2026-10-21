@@ -74,7 +74,7 @@ export async function run(dependencies: ActionDependencies): Promise<void> {
   else await runActionFlow(dependencies)
 }
 
-// Server publishing needs a /v1/scans api-url and a PR event. Everything else (action mode, the
+// Server publishing needs a /ci/scans api-url and a PR event. Everything else (action mode, the
 // default /ci/scanTerraformPlan api-url, push, merge_group, workflow_dispatch) is the v0.1.1 flow under the v0.1.1
 // check name, so branch protection pinned to that check keeps working after an upgrade. Decided
 // from the raw inputs, before readInputs, so the v0.1.1 flow still starts its check first.
@@ -178,7 +178,7 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
   }
 }
 
-// publish-mode server on a PR event against /v1/scans: the Draftt CI App publishes. This Action
+// publish-mode server on a PR event against /ci/scans: the Draftt CI App publishes. This Action
 // creates no check before or during the request, and posts one completed (Action) check only when
 // the server did not publish, or when the request itself failed.
 async function runServerFlow(dependencies: ActionDependencies): Promise<void> {

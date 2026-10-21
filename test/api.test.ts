@@ -41,15 +41,16 @@ test('does not include a backend response body in an HTTP error', async () => {
   }
 })
 
-test('isScansEndpoint accepts /v1/scans with or without a trailing slash and nothing else', () => {
-  assert.equal(isScansEndpoint('https://ci.example.test/v1/scans'), true)
-  assert.equal(isScansEndpoint('https://ci.example.test/v1/scans/'), true)
+test('isScansEndpoint accepts /ci/scans with or without a trailing slash and nothing else', () => {
+  assert.equal(isScansEndpoint('https://ci.example.test/ci/scans'), true)
+  assert.equal(isScansEndpoint('https://ci.example.test/ci/scans/'), true)
   assert.equal(isScansEndpoint('https://api.draftt.io/ci/scanTerraformPlan'), false)
-  assert.equal(isScansEndpoint('https://ci.example.test/v1/scans/extra'), false)
+  assert.equal(isScansEndpoint('https://api.draftt.io/ci/v1/scans'), false)
+  assert.equal(isScansEndpoint('https://ci.example.test/ci/scans/extra'), false)
   assert.equal(isScansEndpoint('not a url'), false)
 })
 
-test('gzips bodies over 1 MiB when the endpoint is /v1/scans and sends smaller bodies plain', async () => {
+test('gzips bodies over 1 MiB when the endpoint is /ci/scans and sends smaller bodies plain', async () => {
   const originalFetch = globalThis.fetch
   const seen: Array<{ encoding: string | null; body: unknown }> = []
   globalThis.fetch = async (_input, init) => {
@@ -58,10 +59,10 @@ test('gzips bodies over 1 MiB when the endpoint is /v1/scans and sends smaller b
   }
   const large = JSON.stringify({ plan: { padding: 'x'.repeat(1024 * 1024) } })
   try {
-    await scanTerraformPlan('https://ci.example.test/v1/scans', 'k', large)
-    await scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{"plan":{}}')
+    await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', large)
+    await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{"plan":{}}')
     await scanTerraformPlan('https://api.draftt.io/ci/scanTerraformPlan', 'k', large)
-    await scanTerraformPlan('https://ci.example.test/v1/scans/', 'k', large)
+    await scanTerraformPlan('https://ci.example.test/ci/scans/', 'k', large)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -97,7 +98,7 @@ test('reports a 403 owner_mismatch with the binding message and does not retry',
   }
   try {
     await assert.rejects(
-      () => scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}'),
+      () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}'),
       (error: unknown) => error instanceof ScanRequestFailure && error.message === 'Draftt CI is bound to a different GitHub organization' && error.code === 'owner_mismatch' && error.status === 403,
     )
   } finally {
@@ -110,13 +111,13 @@ test('a plain 403 is still an authentication failure', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response('forbidden', { status: 403 })
   try {
-    await assert.rejects(() => scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}'), /Draftt authentication failed/)
+    await assert.rejects(() => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}'), /Draftt authentication failed/)
   } finally {
     globalThis.fetch = originalFetch
   }
 })
 
-test('401 and 413 on /v1/scans are not retried and fail with their fixed messages', async () => {
+test('401 and 413 on /ci/scans are not retried and fail with their fixed messages', async () => {
   const cases = [
     { status: 401, message: 'Draftt authentication failed' },
     { status: 413, message: 'Draftt rejected the scan request as too large' },
@@ -131,7 +132,7 @@ test('401 and 413 on /v1/scans are not retried and fail with their fixed message
         return new Response(JSON.stringify({ code: 'backend_code', message: 'backend body text' }), { status: item.status, headers: { 'content-type': 'application/json' } })
       }
       await assert.rejects(
-        () => scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
+        () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
         (error: unknown) => error instanceof ScanRequestFailure && error.status === item.status && error.message === item.message && error.code === undefined,
       )
       assert.equal(calls, 1, `HTTP ${item.status} must not be retried`)
@@ -153,7 +154,7 @@ test('a 429 waits its Retry-After and a 502 waits attempt * 500 ms before the ne
     return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
-    const result = await scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
+    const result = await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
     assert.equal(result.summary.hasPolicyViolations, true)
   } finally {
     globalThis.fetch = originalFetch
@@ -172,7 +173,7 @@ test('a network failure is retried after attempt * 500 ms', async () => {
     return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
-    await scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
+    await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -208,7 +209,7 @@ test('408 and 422 are not retried and report the service or the Action message',
         return new Response(typeof item.body === 'string' ? item.body : JSON.stringify(item.body), { status: item.status })
       }
       await assert.rejects(
-        () => scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
+        () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
         (error: unknown) => {
           assert.ok(error instanceof ScanRequestFailure)
           assert.deepEqual({ status: error.status, code: error.code, message: error.message }, { status: item.status, code: item.code, message: item.message })
@@ -229,7 +230,7 @@ test('a backend message is never passed through for other statuses', async () =>
     for (const status of [400, 404, 409, 413]) {
       globalThis.fetch = async () => new Response(JSON.stringify({ code: 'x', message: 'planted-backend-body' }), { status })
       await assert.rejects(
-        () => scanTerraformPlan('https://ci.example.test/v1/scans', 'k', '{}', { sleep: async () => {} }),
+        () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async () => {} }),
         (error: unknown) => error instanceof Error && !error.message.includes('planted-backend-body'),
       )
     }

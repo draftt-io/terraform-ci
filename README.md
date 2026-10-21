@@ -49,7 +49,7 @@ jobs:
           plan-json: plan.json
           api-key: ${{ secrets.DRAFTT_API_KEY }}
           # Optional: publish through the Draftt CI GitHub App (see Publish mode).
-          # api-url: https://api.draftt.io/ci/v1/scans
+          # api-url: https://api.draftt.io/ci/scans
 ```
 
 Use `tofu plan` and `tofu show -json` instead when the repository uses OpenTofu.
@@ -61,7 +61,7 @@ Use `tofu plan` and `tofu show -json` instead when the repository uses OpenTofu.
 `publish-mode` defaults to `server`. The Draftt CI App publishes only when all three hold:
 
 1. `publish-mode` is `server`;
-2. `api-url` ends with `/v1/scans` (a trailing slash is fine). Until the default changes, set it to `https://api.draftt.io/ci/v1/scans`;
+2. `api-url` ends with `/ci/scans` (a trailing slash is fine). Until the default changes, set it to `https://api.draftt.io/ci/scans`;
 3. the event is a pull request event: `pull_request`, `pull_request_target`, or another event whose payload carries the pull request.
 
 Then the Draftt CI App owns the check and the PR comment, and the Action creates no check of its own while the scan runs. The App's check is named `Draftt Terraform Policy Scan` for the scan key `.` and `Draftt Terraform Policy Scan (<scanKey>)` for any other key:
@@ -78,7 +78,7 @@ Then the Draftt CI App owns the check and the PR comment, and the Action creates
 
 Every other case — `publish-mode: action`, the default `api-url` (`https://api.draftt.io/ci/scanTerraformPlan`), and `push`, `merge_group` or `workflow_dispatch` events — runs the v0.1.1 flow under the unchanged check name `Draftt Terraform Policy Scan`, with the check started before inputs are validated. Only its report layout (below), the new outputs, the `github-token` default (`${{ github.token }}`) and the nested-workspace annotation check change: when `GITHUB_WORKSPACE` is not the repository root, annotations are skipped with a warning. In both publish modes the report links each `path:line` to the changed file at the scanned commit.
 
-Requests to `/v1/scans` over 1 MiB are gzip-compressed. A `429` response waits for `Retry-After` (at most 60 s) before retrying. A `408 upload_timeout` (the upload did not finish within the service's 240 s) and a `422 too_many_scan_keys` are not retried; the Action reports their message as the scan error.
+Requests to `/ci/scans` over 1 MiB are gzip-compressed. A `429` response waits for `Retry-After` (at most 60 s) before retrying. A `408 upload_timeout` (the upload did not finish within the service's 240 s) and a `422 too_many_scan_keys` are not retried; the Action reports their message as the scan error.
 
 ## Report layout
 
@@ -88,7 +88,7 @@ Annotations on the changed lines are plain text and at most 500, most urgent fir
 
 ## Upgrading from v0.1.x
 
-With the default `api-url` only the report layout, the new outputs, the `github-token` default (`${{ github.token }}`, so a workflow that omitted it now gets a check) and the nested-workspace annotation check (annotations are skipped with a warning when `GITHUB_WORKSPACE` is not the repository root) change. Once `api-url` points at `/v1/scans`, the check on pull requests comes from the Draftt CI App, under the name given in Publish mode; if branch protection requires a `Draftt Terraform Policy Scan` check, remove that requirement (see [Check outcome](#check-outcome)). Any pull request that gets no server-mode upload while the App is installed (`action` mode, the default `api-url`, pull requests the workflow skips by path or draft) shows the App's queued check concluding neutral after the timeout (10 minutes by default).
+With the default `api-url` only the report layout, the new outputs, the `github-token` default (`${{ github.token }}`, so a workflow that omitted it now gets a check) and the nested-workspace annotation check (annotations are skipped with a warning when `GITHUB_WORKSPACE` is not the repository root) change. Once `api-url` points at `/ci/scans`, the check on pull requests comes from the Draftt CI App, under the name given in Publish mode; if branch protection requires a `Draftt Terraform Policy Scan` check, remove that requirement (see [Check outcome](#check-outcome)). Any pull request that gets no server-mode upload while the App is installed (`action` mode, the default `api-url`, pull requests the workflow skips by path or draft) shows the App's queued check concluding neutral after the timeout (10 minutes by default).
 
 `fail-on-violations` no longer fails the check or the job in any mode. When it is `true` the job log warns `fail-on-violations is ignored: Draftt CI checks never fail; violations are reported in the check and PR comment.`
 
@@ -132,7 +132,7 @@ The API key belongs to the Draftt organization: a workflow in any repository tha
 
 Size limits: the raw plan file is limited to 50 MiB. The scrubbed plan as sent (what the service measures) is limited to 49 MiB, the service's cap; a larger one is refused before upload with `The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.` The whole request is limited to 50 MiB; the Action drops the source map first when the request would exceed it. The API key is masked before the plan is read.
 
-The Action gzips requests to `/v1/scans` over 1 MiB. Direct callers of `/v1/scans` should send gzip too (`Content-Encoding: gzip`): the service gives an upload 240 s and answers `408 upload_timeout` when the body has not arrived by then.
+The Action gzips requests to `/ci/scans` over 1 MiB. Direct callers of `/ci/scans` should send gzip too (`Content-Encoding: gzip`): the service gives an upload 240 s and answers `408 upload_timeout` when the body has not arrived by then.
 
 ## Logs
 

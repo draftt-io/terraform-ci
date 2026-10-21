@@ -125,7 +125,7 @@ function createHarness(options: HarnessOptions = {}): {
   calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: AnnotationLevel[]; repositories: Array<ReportRepository | undefined> }
 } {
   const failOnScanError = options.failOnScanError ?? false
-  const apiUrl = options.apiUrl ?? 'https://ci.example.test/v1/scans'
+  const apiUrl = options.apiUrl ?? 'https://ci.example.test/ci/scans'
   const runtimeInputs: Record<string, string> = { 'api-key': 'draftt-key', 'api-url': apiUrl, 'fail-on-scan-error': String(failOnScanError) }
   if (options.githubToken !== null) runtimeInputs['github-token'] = options.githubToken ?? 'github-token'
   if (options.publishMode) runtimeInputs['publish-mode'] = options.publishMode
@@ -455,13 +455,13 @@ test('owner_mismatch surfaces the binding message', async () => {
 })
 
 test('a trailing slash on api-url still selects the server flow', async () => {
-  const h = createHarness({ apiUrl: 'https://ci.example.test/v1/scans/', response: { checkRunUrl: 'https://github.com/o/r/runs/1' }, payload: PR })
+  const h = createHarness({ apiUrl: 'https://ci.example.test/ci/scans/', response: { checkRunUrl: 'https://github.com/o/r/runs/1' }, payload: PR })
   await run(h.dependencies)
   assert.equal(h.publisher.starts, 0)
   assertOutputFields(h.runtime, { publisher: 'server' })
 })
 
-test('a push event against /v1/scans runs the v0.1.1 flow under the v0.1.1 check name with no github block', async () => {
+test('a push event against /ci/scans runs the v0.1.1 flow under the v0.1.1 check name with no github block', async () => {
   const h = createHarness()
   await run(h.dependencies)
   assert.equal(h.calls.githubContext, 1)
@@ -661,7 +661,7 @@ test('no logged line carries the Draftt key, the token, a plan value, the api-ur
     { options: { publishMode: 'action', payload: PR }, status: 429 },
   ]
   for (const scenario of scenarios) {
-    const h = createHarness({ ...scenario.options, apiUrl: 'https://ci.example.test/v1/scans?tenant=planted-query' })
+    const h = createHarness({ ...scenario.options, apiUrl: 'https://ci.example.test/ci/scans?tenant=planted-query' })
     const plan: SanitizedPlan = { format_version: '1.2', resource_changes: [{ address: 'aws_s3_bucket.b', change: { after: { bucket: 'planted-plan-value' } } }] }
     h.dependencies.readAndSanitizePlan = async () => plan
     h.dependencies.serializeScanRequest = () => ({ body: JSON.stringify({ plan }), sourceMapDropped: false })

@@ -40,7 +40,7 @@ function reader(values: Record<string, string>): { getInput(name: string): strin
 }
 
 test('publish-mode defaults to server, accepts action, rejects others; github-token is optional', () => {
-  const base = { 'plan-json': 'p', 'api-url': 'https://x/v1/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-violations': 'false', 'fail-on-scan-error': 'false' }
+  const base = { 'plan-json': 'p', 'api-url': 'https://x/ci/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-violations': 'false', 'fail-on-scan-error': 'false' }
   assert.equal(parsePublishMode(''), 'server')
   assert.equal(parsePublishMode('server'), 'server')
   assert.equal(parsePublishMode('action'), 'action')
@@ -79,7 +79,7 @@ test('scanKeyFromTerraformRoot relativises an absolute root inside the workspace
 })
 
 test('fail-on-violations: an empty value is unset (false) and anything but true or false is rejected', () => {
-  const base = { 'plan-json': 'p', 'api-url': 'https://x/v1/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-scan-error': 'false' }
+  const base = { 'plan-json': 'p', 'api-url': 'https://x/ci/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-scan-error': 'false' }
   assert.equal(readInputs(reader(base)).failOnViolations, false)
   assert.equal(readInputs(reader({ ...base, 'fail-on-violations': 'true' })).failOnViolations, true)
   assert.equal(readInputs(reader({ ...base, 'fail-on-violations': 'false' })).failOnViolations, false)

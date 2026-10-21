@@ -32,7 +32,7 @@ inputs:
     required: false
     default: "false"
   publish-mode:
-    description: "server: on pull request events (any event whose payload carries the pull request; see README) against a /v1/scans api-url, the Draftt CI GitHub App publishes the check and PR comment; every other case, and action, keeps the v0.1.1 check; when the App does not publish, the Action posts a fallback (Action) check"
+    description: "server: on pull request events (any event whose payload carries the pull request; see README) against a /ci/scans api-url, the Draftt CI GitHub App publishes the check and PR comment; every other case, and action, keeps the v0.1.1 check; when the App does not publish, the Action posts a fallback (Action) check"
     required: false
     default: server
 

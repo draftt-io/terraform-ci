@@ -24,11 +24,11 @@ export class ScanRequestFailure extends Error {
   }
 }
 
-// The /v1/scans route (https://api.draftt.io/ci/v1/scans). A trailing slash is tolerated; any other path
+// The /ci/scans route (https://api.draftt.io/ci/scans). A trailing slash is tolerated; any other path
 // (the default /ci/scanTerraformPlan) is not.
 export function isScansEndpoint(apiUrl: string): boolean {
   try {
-    return new URL(apiUrl).pathname.replace(/\/+$/, '').endsWith('/v1/scans')
+    return new URL(apiUrl).pathname.replace(/\/+$/, '').endsWith('/ci/scans')
   } catch {
     return false
   }
