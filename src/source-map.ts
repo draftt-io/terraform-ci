@@ -1,7 +1,7 @@
 import { isRecord } from './objects.ts'
 import type { SanitizedPlan } from './plan.ts'
-import type { SourceLocator } from './report.ts'
 import type { SourceMapEntry } from './request.ts'
+import type { SourceLocator } from './source-locator.ts'
 
 export const MAX_SOURCE_MAP_ENTRIES = 100_000
 const MAPPED_ACTIONS = new Set(['create', 'update', 'no-op'])

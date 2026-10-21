@@ -11,29 +11,6 @@ const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
 const GZIP_THRESHOLD_BYTES = 1024 * 1024
 const MAX_RETRY_AFTER_MS = 60_000
 
-// The status and the service's code let the caller tell owner_mismatch, upload_timeout and too_many_scan_keys apart; the Action has no OpError.
-export class ScanRequestFailure extends Error {
-  readonly status: number | undefined
-  readonly code: string | undefined
-
-  constructor(message: string, status?: number, code?: string) {
-    super(message)
-    this.name = 'ScanRequestFailure'
-    this.status = status
-    this.code = code
-  }
-}
-
-// The /ci/scans route (https://api.draftt.io/ci/scans). A trailing slash is tolerated; any other path
-// (the default /ci/scanTerraformPlan) is not.
-export function isScansEndpoint(apiUrl: string): boolean {
-  try {
-    return new URL(apiUrl).pathname.replace(/\/+$/, '').endsWith('/ci/scans')
-  } catch {
-    return false
-  }
-}
-
 // Retry-After as delta-seconds or an HTTP date, capped so one answer cannot stall the job.
 export function retryAfterMs(value: string | null): number | undefined {
   if (value === null || value.trim() === '') return undefined
@@ -50,10 +27,9 @@ export async function scanTerraformPlan(
   // Replaceable only so the tests do not wait the real backoff (up to 1.5 s per exhausted retry).
   options: { sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<ScanResponse> {
-  const endpoint = validateEndpoint(apiUrl)
   const deadline = Date.now() + TOTAL_TIMEOUT_MS
   let lastFailure = 'Draftt scan request failed'
-  const compress = isScansEndpoint(apiUrl) && Buffer.byteLength(body) > GZIP_THRESHOLD_BYTES
+  const compress = Buffer.byteLength(body) > GZIP_THRESHOLD_BYTES
   const payload = compress ? gzipSync(body) : body
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
@@ -63,7 +39,7 @@ export async function scanTerraformPlan(
     const remaining = deadline - Date.now()
     if (remaining <= 0) throw new Error('Draftt scan request timed out')
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch(apiUrl, {
         method: 'POST',
         redirect: 'manual',
         headers: {
@@ -84,16 +60,11 @@ export async function scanTerraformPlan(
         return parseScanResponse(value)
       }
 
-      const error = BODY_READ_STATUS.has(response.status) ? await errorBody(response) : {}
-      if (response.status === 403 && error.code === 'owner_mismatch') {
-        throw new ScanRequestFailure('Draftt CI is bound to a different GitHub organization', 403, 'owner_mismatch')
-      }
+      const serviceMessage = BODY_READ_STATUS.has(response.status) ? await errorMessageOf(response) : undefined
       if (response.status === 429) retryDelay = retryAfterMs(response.headers.get('retry-after')) ?? retryDelay
-      lastFailure = publicStatusMessage(response.status, error)
+      lastFailure = publicStatusMessage(response.status, serviceMessage)
       retryReason = `Draftt answered ${response.status}`
-      // 408 upload_timeout and 422 too_many_scan_keys are final: neither is in RETRYABLE_STATUS.
-      const code = response.status === 408 || response.status === 422 ? error.code : undefined
-      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new ScanRequestFailure(lastFailure, response.status, code)
+      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
     } catch (error) {
       if (error instanceof Error && !isRetryableNetworkError(error)) throw error
       const timedOut = error instanceof Error && error.name === 'TimeoutError'
@@ -108,51 +79,27 @@ export async function scanTerraformPlan(
   throw new Error(lastFailure)
 }
 
-// Error bodies are read only for these statuses: 403 for owner_mismatch, 408 and 422 for their
-// codes and the service message. Any other status's body is never read, so never echoed.
-const BODY_READ_STATUS = new Set([403, 408, 422])
+// Error bodies are read only for these statuses, whose service message (for example the 408 upload timeout or
+// the 422 limit of scans per commit) is the scan error. Any other status's body is never read, so never echoed.
+const BODY_READ_STATUS = new Set([408, 422])
 const MAX_SERVICE_MESSAGE_CHARS = 300
-// The server's limit of scan keys per commit, which its 422 too_many_scan_keys enforces.
-const MAX_SCANS_PER_COMMIT = 50
-const TOO_MANY_SCAN_KEYS = `This commit already has ${MAX_SCANS_PER_COMMIT} Draftt CI scans, the most Draftt CI accepts per commit (one per terraform-root).`
 
-interface ErrorBody {
-  code?: string
-  message?: string
-}
-
-async function errorBody(response: Response): Promise<ErrorBody> {
+async function errorMessageOf(response: Response): Promise<string | undefined> {
   let value: unknown
   try {
     value = await response.json()
   } catch {
-    return {}
+    return undefined
   }
-  if (!isRecord(value)) return {}
-  const { code, message } = value
-  return {
-    ...(typeof code === 'string' ? { code } : {}),
-    ...(typeof message === 'string' && message.trim() !== '' ? { message: message.replace(/\s+/g, ' ').trim().slice(0, MAX_SERVICE_MESSAGE_CHARS) } : {}),
-  }
+  if (!isRecord(value) || typeof value.message !== 'string' || value.message.trim() === '') return undefined
+  return value.message.replace(/\s+/g, ' ').trim().slice(0, MAX_SERVICE_MESSAGE_CHARS)
 }
 
-function validateEndpoint(value: string): URL {
-  let endpoint: URL
-  try {
-    endpoint = new URL(value)
-  } catch {
-    throw new Error('api-url must be a valid URL')
-  }
-  if (endpoint.protocol !== 'https:') throw new Error('api-url must use HTTPS')
-  if (endpoint.username || endpoint.password) throw new Error('api-url must not contain credentials')
-  return endpoint
-}
-
-function publicStatusMessage(status: number, error: ErrorBody = {}): string {
-  if (status === 422 && error.code === 'too_many_scan_keys') return TOO_MANY_SCAN_KEYS
-  if ((status === 408 || status === 422) && error.message) return error.message
+function publicStatusMessage(status: number, serviceMessage: string | undefined): string {
+  if (serviceMessage !== undefined) return serviceMessage
   if (status === 400) return 'Draftt rejected the scan request'
-  if (status === 401 || status === 403) return 'Draftt authentication failed'
+  if (status === 401) return 'Draftt authentication failed'
+  if (status === 403) return 'Draftt refused the scan: the API key is not allowed, or Draftt CI is bound to a different GitHub organization'
   if (status === 413) return 'Draftt rejected the scan request as too large'
   if (status === 429) return 'Draftt rate limited the scan request'
   if (status >= 500) return 'Draftt could not complete the scan'

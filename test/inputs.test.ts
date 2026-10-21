@@ -14,38 +14,22 @@ test('rejects malformed or non-decimal policy ids', () => {
   }
 })
 
-test('reads the public Action interface', () => {
-  const values: Record<string, string> = {
-    'plan-json': 'plan.json',
-    'api-url': 'https://api.draftt.io/ci/scanTerraformPlan',
-    'api-key': 'masked',
-    'github-token': 'github',
-    'terraform-root': '.',
-    'policy-ids': '[]',
-    'fail-on-violations': 'false',
-    'fail-on-scan-error': 'true',
-  }
-  const inputs = readInputs({
-    getInput(name: string): string {
-      return values[name] ?? ''
-    },
-  })
-  assert.deepEqual(inputs.policyIds, [])
-  assert.equal(inputs.failOnViolations, false)
-  assert.equal(inputs.failOnScanError, true)
-})
-
 function reader(values: Record<string, string>): { getInput(name: string): string } {
   return { getInput: (name: string) => values[name] ?? '' }
 }
 
-test('github-token and fail-on-violations are optional; an unknown publish-mode or a non-boolean fail-on-violations is rejected', () => {
-  const base = { 'plan-json': 'p', 'api-url': 'https://x/ci/scans', 'api-key': 'k', 'terraform-root': '.', 'fail-on-scan-error': 'false' }
+test('reads the public Action interface and accepts only an https /ci/scans api-url', () => {
+  const base = { 'plan-json': 'plan.json', 'api-url': 'https://api.draftt.io/ci/scans/', 'api-key': 'masked', 'terraform-root': '.', 'policy-ids': '[]', 'fail-on-scan-error': 'true' }
   const inputs = readInputs(reader(base))
-  assert.equal(inputs.githubToken, undefined)
-  assert.equal(inputs.failOnViolations, false)
-  assert.throws(() => readInputs(reader({ ...base, 'publish-mode': 'both' })), /publish-mode must be "server" or "action"/)
-  assert.throws(() => readInputs(reader({ ...base, 'fail-on-violations': 'yes' })), /fail-on-violations must be true or false/)
+  assert.deepEqual(inputs.policyIds, [])
+  assert.equal(inputs.failOnScanError, true)
+  const invalid: Array<[string, RegExp]> = [
+    ['https://api.draftt.io/ci/scanTerraformPlan', /api-url must be the Draftt CI scans endpoint, ending in \/ci\/scans/],
+    ['http://api.draftt.io/ci/scans', /must use HTTPS/],
+    ['https://user:password@api.draftt.io/ci/scans', /must not contain credentials/],
+  ]
+  for (const [apiUrl, message] of invalid) assert.throws(() => readInputs(reader({ ...base, 'api-url': apiUrl })), message, apiUrl)
+  assert.throws(() => readInputs(reader({ ...base, 'fail-on-scan-error': 'yes' })), /fail-on-scan-error must be true or false/)
 })
 
 test('terraform-root becomes a canonical scan key relative to the workspace, and a root outside it is rejected', () => {

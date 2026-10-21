@@ -1,5 +1,4 @@
 import { isRecord } from './objects.ts'
-import type { ReportRepository } from './report.ts'
 
 export interface SourceMapEntry {
   path: string
@@ -18,13 +17,13 @@ export interface GitHubScanContext {
   sourceMap?: Record<string, SourceMapEntry>
 }
 
-// Only pull_request and pull_request_target payloads carry a PR number; other events get no block.
+// Only pull_request and pull_request_target payloads carry a PR number; other events get no block,
+// and Draftt CI then scans without publishing to GitHub.
 export function buildGitHubContext(input: {
   payload: Record<string, unknown>
   env: NodeJS.ProcessEnv
   headSha: string
   scanKey: string
-  sourceMap?: Record<string, SourceMapEntry>
 }): GitHubScanContext | undefined {
   const pullRequest = isRecord(input.payload.pull_request) ? input.payload.pull_request : undefined
   const pullRequestNumber = positiveInteger(pullRequest?.number)
@@ -46,28 +45,29 @@ export function buildGitHubContext(input: {
     runId,
     runAttempt,
     ...(workflowRunUrl ? { workflowRunUrl } : {}),
-    ...(input.sourceMap ? { sourceMap: input.sourceMap } : {}),
   }
 }
 
-// For path:line links in the report: the payload repository, else GITHUB_REPOSITORY (owner/repo).
-export function repositoryFromPayload(input: {
-  payload: Record<string, unknown>
-  env: NodeJS.ProcessEnv
-  headSha: string
-}): ReportRepository | undefined {
-  if (!input.headSha) return undefined
-  const repository = isRecord(input.payload.repository) ? input.payload.repository : {}
-  const owner = isRecord(repository.owner) ? repository.owner : {}
-  if (nonEmpty(owner.login) && nonEmpty(repository.name)) return { owner: owner.login, repo: repository.name, headSha: input.headSha }
-  const slug = input.env.GITHUB_REPOSITORY ?? ''
-  const slash = slug.indexOf('/')
-  if (slash <= 0 || slash === slug.length - 1) return undefined
-  return { owner: slug.slice(0, slash), repo: slug.slice(slash + 1), headSha: input.headSha }
+// The pull request head when the event carries one, else the commit the workflow runs on.
+export function headShaOf(input: { payload: Record<string, unknown>; env: NodeJS.ProcessEnv }): string {
+  const pullRequest = isRecord(input.payload.pull_request) ? input.payload.pull_request : {}
+  const head = isRecord(pullRequest.head) ? pullRequest.head : {}
+  if (typeof head.sha === 'string') return head.sha
+  if (!input.env.GITHUB_SHA) throw new Error('GitHub commit SHA is unavailable')
+  return input.env.GITHUB_SHA
 }
 
-function nonEmpty(value: unknown): value is string {
-  return typeof value === 'string' && value !== ''
+// A pull request from another repository: GitHub withholds repository secrets, so there is no Draftt key.
+export function isExternalFork(payload: Record<string, unknown>): boolean {
+  const pullRequest = isRecord(payload.pull_request) ? payload.pull_request : {}
+  const headName = repositoryFullName(pullRequest.head)
+  const baseName = repositoryFullName(pullRequest.base)
+  return headName !== undefined && baseName !== undefined && headName !== baseName
+}
+
+function repositoryFullName(reference: unknown): string | undefined {
+  const repository = isRecord(reference) && isRecord(reference.repo) ? reference.repo : {}
+  return typeof repository.full_name === 'string' ? repository.full_name : undefined
 }
 
 // The server rejects a non-https workflowRunUrl with 422 (validation); it is optional, so omit it rather than fail the upload.

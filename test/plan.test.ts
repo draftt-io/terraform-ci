@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { MAX_PLAN_BYTES, MAX_PLAN_FILE_BYTES, readAndSanitizePlan, sanitizePlan, serializeScanRequest } from '../src/plan.ts'
-import type { SourceLocator } from '../src/report.ts'
+import type { SourceLocator } from '../src/source-locator.ts'
 import { buildSourceMap, MAX_SOURCE_MAP_ENTRIES } from '../src/source-map.ts'
 
 function basePlan(): Record<string, unknown> {

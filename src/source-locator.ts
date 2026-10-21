@@ -25,6 +25,10 @@ export type SourceMapping =
   | { kind: 'found'; location: SourceLocation }
   | { kind: 'unresolved'; reason: SourceMappingReason }
 
+export interface SourceLocator {
+  locate(reference: TerraformComponentReference): Promise<SourceMapping>
+}
+
 export interface TerraformSourceLocatorOptions {
   workspaceRoot: string
   terraformRoot: string
