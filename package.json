@@ -1,6 +1,6 @@
 {
   "name": "@draftt-io/terraform-ci",
-  "version": "0.0.0",
+  "version": "1.0.0-rc.1",
   "private": true,
   "description": "GitHub Action for Draftt Terraform policy scans",
   "type": "module",
@@ -13,8 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@actions/core": "2.0.1",
-    "@actions/github": "8.0.1"
+    "@actions/core": "2.0.1"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

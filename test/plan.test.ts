@@ -3,7 +3,9 @@ import { mkdtemp, open, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { MAX_PLAN_BYTES, readAndSanitizePlan, sanitizePlan, serializeScanRequest } from '../src/plan.ts'
+import { MAX_PLAN_BYTES, MAX_PLAN_FILE_BYTES, readAndSanitizePlan, sanitizePlan, serializeScanRequest } from '../src/plan.ts'
+import type { SourceLocator } from '../src/source-locator.ts'
+import { buildSourceMap, MAX_SOURCE_MAP_ENTRIES } from '../src/source-map.ts'
 
 function basePlan(): Record<string, unknown> {
   return {
@@ -249,7 +251,7 @@ test('rejects an unmarked recognized credential left in a retained field', () =>
 })
 
 test('serializes explicit empty policy selection', () => {
-  const body = JSON.parse(serializeScanRequest(sanitizePlan(basePlan()), [])) as Record<string, unknown>
+  const body = JSON.parse(serializeScanRequest(sanitizePlan(basePlan()), []).body) as Record<string, unknown>
   assert.deepEqual(body.policyIds, [])
 })
 
@@ -270,7 +272,7 @@ test('rejects oversized and outside-workspace plan files before parsing', async 
   try {
     const oversizedPath = path.join(workspace, 'oversized.json')
     const file = await open(oversizedPath, 'w')
-    await file.truncate(MAX_PLAN_BYTES + 1)
+    await file.truncate(MAX_PLAN_FILE_BYTES + 1)
     await file.close()
     await assert.rejects(() => readAndSanitizePlan('oversized.json', workspace), /50 MiB input limit/)
 
@@ -308,4 +310,86 @@ test('rejects malformed actions and mirrors before serialization', () => {
     () => sanitizePlan(invalidMirrorPlan),
     (error: unknown) => error instanceof Error && error.message.includes('invalid value mirror') && !error.message.includes('unrecognized-plain-secret'),
   )
+})
+
+test('serializeScanRequest drops the source map first when the body would exceed the request limit', () => {
+  // A plan just under the 49 MiB plan cap: the plan alone fits, the plan plus a 1.3 MB map does not.
+  const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
+  const sourceMap = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`r.${i}`, { path: 'x'.repeat(100), startLine: 1 }]))
+  const github = { repositoryId: 1, repositoryOwnerId: 2, pullRequestNumber: 3, headSha: 'a'.repeat(40), scanKey: '.', runId: 1, runAttempt: 1, sourceMap }
+  const { body, sourceMapDropped } = serializeScanRequest(plan, undefined, github)
+  assert.equal(sourceMapDropped, true)
+  assert.equal(JSON.parse(body).github.sourceMap, undefined)
+  assert.equal(JSON.parse(body).github.scanKey, '.')
+
+  const small = { format_version: '1.2', resource_changes: [{ address: 'a.b', change: { after: { name: 'café "q" \\' } } }] }
+  const smallGithub = { ...github, sourceMap: { 'a.b': { path: 'a.tf', startLine: 1 } } }
+  assert.deepEqual(serializeScanRequest(small, ['1'], smallGithub), { body: JSON.stringify({ plan: small, policyIds: ['1'], github: smallGithub }), sourceMapDropped: false })
+})
+
+test('refuses a serialized plan over 49 MiB, and a request over 50 MiB even when the plan fits', () => {
+  const oversizedPlan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(Math.round(49.5 * 1024 * 1024)) }] }
+  assert.throws(
+    () => serializeScanRequest(oversizedPlan, undefined),
+    (error: unknown) => error instanceof Error && error.message === 'The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.',
+  )
+  const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
+  // About 1.3 MB of policy ids push the request over 50 MiB; there is no source map to drop.
+  const policyIds = Array.from({ length: 100_000 }, (_, i) => String(1_000_000_000 + i))
+  assert.throws(() => serializeScanRequest(plan, policyIds), /Scrubbed scan request exceeds the 50 MiB request limit/)
+})
+
+test('strips assume_role_policy when marked sensitive', () => {
+  const trustPolicy = '{"Statement":[{"Action":"sts:AssumeRole","Principal":{"Service":"ec2.amazonaws.com"}}]}'
+  const role = { address: 'aws_iam_role.app', mode: 'managed', type: 'aws_iam_role', name: 'app' }
+  const plan = {
+    format_version: '1.2',
+    resource_changes: [{
+      ...role,
+      change: {
+        actions: ['create'],
+        before: null,
+        after: { name: 'app', assume_role_policy: trustPolicy, max_session_duration: 3600 },
+        before_sensitive: false,
+        after_sensitive: { assume_role_policy: true },
+        after_unknown: { arn: true, assume_role_policy: false },
+      },
+    }],
+    configuration: { root_module: { resources: [{ ...role, expressions: { name: { constant_value: 'app' }, assume_role_policy: { constant_value: trustPolicy } } }] } },
+  }
+
+  const serialized = JSON.stringify(sanitizePlan(plan))
+  assert.equal(serialized.includes('assume_role_policy'), false)
+  assert.equal(serialized.includes('sts:AssumeRole'), false)
+  assert.ok(serialized.includes('"max_session_duration":3600'))
+})
+
+test('the source map keys exact plan addresses of retained managed resources and stops at the server entry limit', async () => {
+  const known: Record<string, { path: string; startLine: number }> = {
+    'module.a["k"].aws_s3_bucket.b[0]': { path: 'modules/a/main.tf', startLine: 3 },
+    'aws_instance.web': { path: 'ec2.tf', startLine: 10 },
+  }
+  const locator: SourceLocator = {
+    async locate(reference) {
+      const location = known[reference.address]
+      return location ? { kind: 'found', location } : { kind: 'unresolved', reason: 'missing_declaration' }
+    },
+  }
+  const plan = {
+    format_version: '1.2',
+    resource_changes: [
+      { address: 'module.a["k"].aws_s3_bucket.b[0]', mode: 'managed', change: { actions: ['create'] } },
+      { address: 'aws_instance.web', mode: 'managed', change: { actions: ['no-op'] } },
+      { address: 'aws_instance.gone', mode: 'managed', change: { actions: ['delete'] } },
+      { address: 'data.aws_caller_identity.me', mode: 'data', change: { actions: ['read'] } },
+      { address: 'aws_db_instance.unknown', mode: 'managed', change: { actions: ['update'] } },
+    ],
+  }
+  assert.deepEqual(await buildSourceMap(plan, locator), { sourceMap: known, capped: false })
+
+  const resourceChanges = Array.from({ length: MAX_SOURCE_MAP_ENTRIES + 1 }, (_, index) => ({ address: `aws_instance.web_${index}`, mode: 'managed', change: { actions: ['create'] } }))
+  const everyAddress: SourceLocator = { locate: async () => ({ kind: 'found', location: { path: 'ec2.tf', startLine: 1 } }) }
+  const capped = await buildSourceMap({ format_version: '1.2', resource_changes: resourceChanges }, everyAddress)
+  assert.equal(capped.capped, true)
+  assert.equal(Object.keys(capped.sourceMap).length, MAX_SOURCE_MAP_ENTRIES)
 })

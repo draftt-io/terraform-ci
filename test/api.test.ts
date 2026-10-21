@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { gunzipSync } from 'node:zlib'
 import { scanTerraformPlan } from '../src/api.ts'
 import { scanResponse } from './fixtures.ts'
 
@@ -13,8 +14,8 @@ test('sends the scrubbed request with bearer authentication and parses the respo
     return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
-    const result = await scanTerraformPlan('https://api.draftt.io/ci/scanTerraformPlan', 'secret-key', '{"plan":{}}')
-    assert.equal(result.summary.hasPolicyViolations, true)
+    const result = await scanTerraformPlan('https://api.draftt.io/ci/scans', 'secret-key', '{"plan":{}}')
+    assert.equal(result.components.length, 1)
     assert.equal(capturedBody, '{"plan":{}}')
     assert.equal(capturedAuthorization, 'Bearer secret-key')
   } finally {
@@ -22,19 +23,89 @@ test('sends the scrubbed request with bearer authentication and parses the respo
   }
 })
 
-test('rejects insecure or credential-bearing API URLs before making a request', async () => {
-  await assert.rejects(() => scanTerraformPlan('http://api.draftt.io/ci/scanTerraformPlan', 'key', '{}'), /must use HTTPS/)
-  await assert.rejects(() => scanTerraformPlan('https://user:password@api.draftt.io/ci/scanTerraformPlan', 'key', '{}'), /must not contain credentials/)
-})
-
-test('does not include a backend response body in an HTTP error', async () => {
+test('a 500 answer is final and its body is never shown', async () => {
   const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response('{"message":"sensitive backend detail"}', { status: 400 })
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    return new Response('{"message":"sensitive backend detail"}', { status: 500 })
+  }
   try {
     await assert.rejects(
-      () => scanTerraformPlan('https://api.draftt.io/ci/scanTerraformPlan', 'key', '{}'),
-      (error: unknown) => error instanceof Error && error.message === 'Draftt rejected the scan request',
+      () => scanTerraformPlan('https://api.draftt.io/ci/scans', 'key', '{}'),
+      (error: unknown) => error instanceof Error && error.message === 'Draftt could not complete the scan',
     )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(calls, 1)
+})
+
+test('gzips bodies over 1 MiB and sends smaller bodies plain', async () => {
+  const originalFetch = globalThis.fetch
+  const seen: Array<{ encoding: string | null; body: unknown }> = []
+  globalThis.fetch = async (_input, init) => {
+    seen.push({ encoding: new Headers(init?.headers).get('content-encoding'), body: init?.body })
+    return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const large = JSON.stringify({ plan: { padding: 'x'.repeat(1024 * 1024) } })
+  try {
+    await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', large)
+    await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{"plan":{}}')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(seen[0]?.encoding, 'gzip')
+  assert.ok(seen[0]?.body instanceof Buffer)
+  assert.equal(gunzipSync(seen[0].body).toString('utf8'), large)
+  assert.deepEqual(seen.slice(1), [{ encoding: null, body: '{"plan":{}}' }])
+})
+
+test('a 503 answer and a network failure each wait attempt * 500 ms before the next attempt', async () => {
+  const originalFetch = globalThis.fetch
+  const sleeps: number[] = []
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    if (calls === 1) return new Response('Service Unavailable', { status: 503 })
+    if (calls === 2) throw new TypeError('fetch failed')
+    return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const result = await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
+    assert.equal(result.components.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(calls, 3)
+  assert.deepEqual(sleeps, [500, 1_000])
+})
+
+test('4xx and 502 answers pass the service message through, or name the status without one; only 502 is retried', async () => {
+  const cases = [
+    { status: 400, body: { status: 400, message: 'invalid_json' }, message: 'Draftt answered 400: invalid_json', calls: 1 },
+    { status: 403, body: { status: 403, message: 'owner_mismatch' }, message: 'Draftt answered 403: owner_mismatch', calls: 1 },
+    { status: 413, body: { status: 413, message: 'payload_too_large: the request body exceeds 50 MiB' }, message: 'Draftt answered 413: payload_too_large: the request body exceeds 50 MiB', calls: 1 },
+    { status: 422, body: { message: 'Validation Failed', details: { 'body.plan': {} } }, message: 'Draftt answered 422: Validation Failed', calls: 1 },
+    { status: 422, body: { message: 3 }, message: 'Draftt scan request failed with HTTP 422', calls: 1 },
+    { status: 502, body: { status: 502, message: 'github_unavailable' }, message: 'Draftt answered 502: github_unavailable', calls: 3 },
+  ]
+  const originalFetch = globalThis.fetch
+  try {
+    for (const item of cases) {
+      let calls = 0
+      const sleeps: number[] = []
+      globalThis.fetch = async () => {
+        calls += 1
+        return new Response(typeof item.body === 'string' ? item.body : JSON.stringify(item.body), { status: item.status })
+      }
+      await assert.rejects(
+        () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
+        (error: unknown) => error instanceof Error && error.message === item.message,
+      )
+      assert.equal(calls, item.calls, `HTTP ${item.status} is sent ${item.calls} time(s)`)
+      assert.equal(sleeps.length, item.calls - 1)
+    }
   } finally {
     globalThis.fetch = originalFetch
   }
