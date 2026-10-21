@@ -79,7 +79,7 @@ test('Retry-After is read as seconds or an HTTP date and capped at 60 s', () => 
   assert.equal(retryAfterMs('0'), 0)
   assert.equal(retryAfterMs('30'), 30_000)
   assert.equal(retryAfterMs('600'), 60_000)
-  // HTTP dates have whole seconds, so a date 10 s ahead is between 9 and 10 s away.
+  // HTTP dates have whole seconds and the test itself takes time, so a date 10 s ahead reads as at most 10 s and more than 8 s.
   const tenSecondsAhead = retryAfterMs(new Date(Date.now() + 10_000).toUTCString())
   assert.ok(tenSecondsAhead !== undefined && tenSecondsAhead > 8_000 && tenSecondsAhead <= 10_000, String(tenSecondsAhead))
   assert.equal(retryAfterMs(new Date(Date.now() + 3_600_000).toUTCString()), 60_000)

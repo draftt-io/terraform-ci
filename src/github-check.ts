@@ -31,6 +31,10 @@ export interface CheckCompletion {
   summary: string
 }
 
+export interface AnnotatedCheckCompletion extends CheckCompletion {
+  annotations: CheckAnnotation[]
+}
+
 export class CheckPublisher {
   readonly #octokit: ReturnType<typeof getOctokit>
   readonly #owner: string
@@ -110,7 +114,7 @@ export class CheckPublisher {
   // annotation batches repeat the same title and summary. The check already carries its conclusion,
   // so a rejected later batch stops the rest with one warning and annotationCount stays what GitHub
   // accepted.
-  async publishCompleted(input: CheckCompletion & { annotations: CheckAnnotation[] }): Promise<void> {
+  async publishCompleted(input: AnnotatedCheckCompletion): Promise<void> {
     const { conclusion, title, summary, annotations } = input
     const [first = [], ...rest] = annotationBatches(annotations)
     const now = new Date().toISOString()

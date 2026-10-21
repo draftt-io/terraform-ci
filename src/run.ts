@@ -1,6 +1,6 @@
 import { isScansEndpoint } from './api.ts'
 import type { ScanResponse } from './contracts.ts'
-import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckCompletion, type CheckConclusion, type CheckPublisherInput } from './github-check.ts'
+import { CHECK_NAME, FALLBACK_CHECK_NAME, type AnnotatedCheckCompletion, type CheckAnnotation, type CheckCompletion, type CheckConclusion, type CheckPublisherInput } from './github-check.ts'
 import { parsePublishMode, scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
 import { safeErrorMessage } from './objects.ts'
 import type { SanitizedPlan } from './plan.ts'
@@ -39,7 +39,7 @@ export interface CheckPublisherLike {
   start(): Promise<void>
   publishAnnotations(annotations: CheckAnnotation[]): Promise<void>
   finish(input: CheckCompletion): Promise<void>
-  publishCompleted(input: CheckCompletion & { annotations: CheckAnnotation[] }): Promise<void>
+  publishCompleted(input: AnnotatedCheckCompletion): Promise<void>
 }
 
 export interface ActionDependencies {

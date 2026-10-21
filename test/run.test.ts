@@ -3,7 +3,7 @@ import test from 'node:test'
 import type { ScanResponse } from '../src/contracts.ts'
 import { ScanRequestFailure, scanTerraformPlan } from '../src/api.ts'
 import { CHECK_NAME, FALLBACK_CHECK_NAME } from '../src/github-check.ts'
-import type { AnnotationLevel, CheckAnnotation, CheckCompletion, CheckConclusion } from '../src/github-check.ts'
+import type { AnnotatedCheckCompletion, AnnotationLevel, CheckAnnotation, CheckCompletion, CheckConclusion } from '../src/github-check.ts'
 import type { ActionInputs } from '../src/inputs.ts'
 import { scanErrorConclusion, violationConclusion } from '../src/outcome.ts'
 import type { SanitizedPlan } from '../src/plan.ts'
@@ -89,7 +89,7 @@ class FakePublisher implements CheckPublisherLike {
     this.conclusions.push(conclusion)
   }
 
-  async publishCompleted({ conclusion, title, annotations }: CheckCompletion & { annotations: CheckAnnotation[] }): Promise<void> {
+  async publishCompleted({ conclusion, title, annotations }: AnnotatedCheckCompletion): Promise<void> {
     if (this.failCompleted) throw new Error('GitHub create failed')
     this.completed.push({ conclusion, title, annotations: annotations.length })
     this.annotationCount += annotations.length
