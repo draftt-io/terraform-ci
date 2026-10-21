@@ -234,12 +234,12 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-test('each HTTP failure, with fail-on-scan-error, fails the job with its user message; only 5xx is retried', async (t) => {
+test('each HTTP failure, with fail-on-scan-error, fails the job with its user message; a 4xx or 500 is not retried', async (t) => {
   const cases = [
     { status: 403, body: { status: 403, message: 'owner_mismatch' }, attempts: 1, message: 'Draftt answered 403: owner_mismatch' },
-    { status: 413, body: { status: 413, message: 'payload_too_large: plan' }, attempts: 1, message: 'Draftt answered 413: payload_too_large: plan' },
+    { status: 413, body: { status: 413, message: 'payload_too_large: the Terraform plan exceeds 49 MiB' }, attempts: 1, message: 'Draftt answered 413: payload_too_large: the Terraform plan exceeds 49 MiB' },
     { status: 422, body: { status: 422, message: 'too_many_scan_keys' }, attempts: 1, message: 'Draftt answered 422: too_many_scan_keys' },
-    { status: 500, body: { status: 500, message: 'internal error' }, attempts: 3, message: 'Draftt could not complete the scan' },
+    { status: 500, body: { status: 500, message: 'internal error' }, attempts: 1, message: 'Draftt could not complete the scan' },
   ]
   for (const item of cases) {
     const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(item.status, item.body))

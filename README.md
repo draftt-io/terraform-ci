@@ -84,7 +84,7 @@ Outputs contain counts and the check URL only, never plan data, policy details, 
 
 ## Requests and errors
 
-Requests over 1 MiB are gzip-compressed. `5xx` answers and network failures are retried up to 3 attempts, waiting 0.5 s then 1 s. Other statuses are final. On a `401`, `403`, `413` or `422` the service's message (for example `owner_mismatch` or `too_many_scan_keys`) is part of the scan error; every other failure is reported by status, and its body is never read.
+Requests over 1 MiB are gzip-compressed, and a scrubbed plan over 49 MiB fails the scan before anything is sent. `502`, `503` and `504` answers and network failures are retried up to 3 attempts, waiting 0.5 s then 1 s; other statuses, `500` included, are final. On a `4xx` or a `502` the scan error is `Draftt answered <status>: <message>` with the service's message (for example `owner_mismatch` or `github_unavailable`); a `500` or other `5xx` is reported by status, and its body is never read.
 
 ## Plan security
 

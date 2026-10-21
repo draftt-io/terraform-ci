@@ -47,10 +47,13 @@ export async function scanTerraformPlan(
         return parseScanResponse(value)
       }
 
-      const serviceMessage = BODY_READ_STATUS.has(response.status) ? await errorMessageOf(response) : undefined
+      // A 4xx or 502 message names the reason (for example owner_mismatch or github_unavailable).
+      // Other 5xx bodies are never read, so never echoed.
+      const showsMessage = (response.status >= 400 && response.status < 500) || response.status === 502
+      const serviceMessage = showsMessage ? await errorMessageOf(response) : undefined
       lastFailure = publicStatusMessage(response.status, serviceMessage)
       retryReason = `Draftt answered ${response.status}`
-      if (response.status < 500 || attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
+      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
     } catch (error) {
       if (error instanceof Error && !isRetryableNetworkError(error)) throw error
       const timedOut = error instanceof Error && error.name === 'TimeoutError'
@@ -65,9 +68,8 @@ export async function scanTerraformPlan(
   throw new Error(lastFailure)
 }
 
-// Error bodies are read only for these statuses, whose service message names the reason (for example
-// owner_mismatch or too_many_scan_keys). Any other status's body is never read, so never echoed.
-const BODY_READ_STATUS = new Set([401, 403, 413, 422])
+// Gateway answers that a later attempt can clear. A 500 is a server fault and is not retried.
+const RETRYABLE_STATUS = new Set([502, 503, 504])
 const MAX_SERVICE_MESSAGE_CHARS = 300
 
 async function errorMessageOf(response: Response): Promise<string | undefined> {
