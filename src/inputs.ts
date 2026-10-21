@@ -9,10 +9,8 @@ export interface ActionInputs {
   githubToken?: string
   terraformRoot: string
   policyIds?: string[]
-  // Deprecated and a no-op in every flow; still sent in the github block, which the server ignores.
+  // Deprecated and a no-op in every flow: true only prints the deprecation warning.
   failOnViolations: boolean
-  // As given: '' when unset; the deprecation warning prints only for 'true'.
-  failOnViolationsRaw: '' | 'true' | 'false'
   failOnScanError: boolean
   publishMode: PublishMode
 }
@@ -24,7 +22,6 @@ export interface InputReader {
 export function readInputs(core: InputReader): ActionInputs {
   const policyIds = parsePolicyIds(core.getInput('policy-ids'))
   const githubToken = core.getInput('github-token')
-  const failOnViolationsRaw = parseOptionalBoolean(core.getInput('fail-on-violations'), 'fail-on-violations')
   return {
     planJson: core.getInput('plan-json', { required: true }),
     apiUrl: core.getInput('api-url', { required: true }),
@@ -32,8 +29,7 @@ export function readInputs(core: InputReader): ActionInputs {
     ...(githubToken === '' ? {} : { githubToken }),
     terraformRoot: core.getInput('terraform-root', { required: true }),
     ...(policyIds === undefined ? {} : { policyIds }),
-    failOnViolations: failOnViolationsRaw === 'true',
-    failOnViolationsRaw,
+    failOnViolations: parseOptionalBoolean(core.getInput('fail-on-violations'), 'fail-on-violations'),
     failOnScanError: parseBoolean(core.getInput('fail-on-scan-error'), 'fail-on-scan-error'),
     publishMode: parsePublishMode(core.getInput('publish-mode')),
   }
@@ -83,9 +79,8 @@ export function parsePolicyIds(value: string): string[] | undefined {
 }
 
 // action.yml gives fail-on-violations no default, so '' is a valid, unset value (false).
-function parseOptionalBoolean(value: string, name: string): '' | 'true' | 'false' {
-  if (value === '' || value === 'true' || value === 'false') return value
-  throw new Error(`${name} must be true or false`)
+function parseOptionalBoolean(value: string, name: string): boolean {
+  return value === '' ? false : parseBoolean(value, name)
 }
 
 function parseBoolean(value: string, name: string): boolean {

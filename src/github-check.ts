@@ -1,6 +1,7 @@
 // GitHub's official toolkit provides authenticated REST clients, workflow context and the job log.
 import * as core from '@actions/core'
 import { context, getOctokit } from '@actions/github'
+import { safeErrorMessage } from './objects.ts'
 
 export const CHECK_NAME = 'Draftt Terraform Policy Scan'
 // The server flow's own check, posted only when the Draftt CI App did not publish.
@@ -135,8 +136,8 @@ export class CheckPublisher {
           check_run_id: response.data.id,
           output: { title, summary, annotations: batch },
         })
-      } catch {
-        core.warning(`Only ${this.#publishedAnnotations} of ${annotations.length} annotations could be added to the Draftt check.`)
+      } catch (error) {
+        core.warning(`Only ${this.#publishedAnnotations} of ${annotations.length} annotations could be added to the Draftt check: ${safeErrorMessage(error)}`)
         return
       }
       this.#publishedAnnotations += batch.length

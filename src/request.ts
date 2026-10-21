@@ -15,7 +15,6 @@ export interface GitHubScanContext {
   runId: number
   runAttempt: number
   workflowRunUrl?: string
-  failOnViolations: boolean
   sourceMap?: Record<string, SourceMapEntry>
 }
 
@@ -24,7 +23,6 @@ export function buildGitHubContext(input: {
   payload: Record<string, unknown>
   env: NodeJS.ProcessEnv
   headSha: string
-  failOnViolations: boolean
   scanKey: string
   sourceMap?: Record<string, SourceMapEntry>
 }): GitHubScanContext | undefined {
@@ -48,7 +46,6 @@ export function buildGitHubContext(input: {
     runId,
     runAttempt,
     ...(workflowRunUrl ? { workflowRunUrl } : {}),
-    failOnViolations: input.failOnViolations,
     ...(input.sourceMap ? { sourceMap: input.sourceMap } : {}),
   }
 }

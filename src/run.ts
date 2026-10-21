@@ -2,6 +2,7 @@ import { isScansEndpoint } from './api.ts'
 import type { ScanResponse } from './contracts.ts'
 import { CHECK_NAME, FALLBACK_CHECK_NAME, type CheckAnnotation, type CheckCompletion, type CheckConclusion, type CheckPublisherInput } from './github-check.ts'
 import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
+import { safeErrorMessage } from './objects.ts'
 import type { SanitizedPlan } from './plan.ts'
 import type { BuildScanReportInput, ReportRepository, ScanReport, SourceLocator } from './report.ts'
 import { repositoryFromPayload, type GitHubScanContext, type SourceMapEntry } from './request.ts'
@@ -10,6 +11,7 @@ import type { WorkspaceSourceStatus } from './workspace.ts'
 
 type ScanStatus = 'completed' | 'skipped' | 'error'
 type Publisher = 'server' | 'action' | 'none'
+type InputsRead = { inputs: ActionInputs } | { inputsError: unknown }
 
 interface Outputs {
   status: ScanStatus
@@ -52,7 +54,7 @@ export interface ActionDependencies {
   inspectWorkspaceForSourceMapping(workspaceRoot: string, expectedSha: string): Promise<WorkspaceSourceStatus>
   createSourceLocator(workspaceRoot: string, terraformRoot: string): Promise<SourceLocator>
   buildSourceMap(plan: SanitizedPlan, locator: SourceLocator): Promise<{ sourceMap: Record<string, SourceMapEntry>; capped: boolean }>
-  buildGitHubContext(input: { payload: Record<string, unknown>; env: NodeJS.ProcessEnv; headSha: string; failOnViolations: boolean; scanKey: string; sourceMap?: Record<string, SourceMapEntry> }): GitHubScanContext | undefined
+  buildGitHubContext(input: { payload: Record<string, unknown>; env: NodeJS.ProcessEnv; headSha: string; scanKey: string; sourceMap?: Record<string, SourceMapEntry> }): GitHubScanContext | undefined
   eventPayload(): Record<string, unknown>
   env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
@@ -63,55 +65,64 @@ export interface ActionDependencies {
 }
 
 export async function run(dependencies: ActionDependencies): Promise<void> {
-  setOutputs(dependencies.runtime, { status: 'error', violations: 0, warnings: 0, annotations: 0, checkRunUrl: '', publisher: 'none' })
+  const { runtime } = dependencies
+  setOutputs(runtime, { status: 'error', violations: 0, warnings: 0, annotations: 0, checkRunUrl: '', publisher: 'none' })
 
   if (dependencies.isExternalFork()) {
     await skipExternalFork(dependencies)
     return
   }
-  if (usesServerFlow(dependencies)) await runServerFlow(dependencies)
-  else await runActionFlow(dependencies)
+  const apiKey = runtime.getInput('api-key')
+  if (apiKey) runtime.setSecret(apiKey)
+  const githubToken = runtime.getInput('github-token')
+  if (githubToken) runtime.setSecret(githubToken)
+
+  let inputs: ActionInputs
+  try {
+    inputs = dependencies.readInputs(runtime)
+  } catch (inputsError) {
+    // Invalid inputs leave the publish mode unknown, so the v0.1.1 flow reports the error on its own check.
+    await runActionFlow(dependencies, { inputsError })
+    return
+  }
+  if (usesServerFlow(dependencies, inputs)) await runServerFlow(dependencies, inputs)
+  else await runActionFlow(dependencies, { inputs })
 }
 
-// Server publishing needs a /v1/scans api-url and a PR event. Everything else (action mode, the
-// default /ci/scanTerraformPlan api-url, push, merge_group, workflow_dispatch) is the v0.1.1 flow under the v0.1.1
-// check name, so branch protection pinned to that check keeps working after an upgrade. Decided
-// from the raw inputs, before readInputs, so the v0.1.1 flow still starts its check first.
-function usesServerFlow(dependencies: ActionDependencies): boolean {
-  const { runtime } = dependencies
-  if (runtime.getInput('publish-mode') === 'action') return false
-  if (!isScansEndpoint(runtime.getInput('api-url'))) return false
+// Server publishing needs publish-mode server, a /v1/scans api-url and a PR event. Everything else (action mode,
+// the default /ci/scanTerraformPlan api-url, push, merge_group, workflow_dispatch) is the v0.1.1 flow under the
+// v0.1.1 check name, so branch protection pinned to that check keeps working after an upgrade.
+function usesServerFlow(dependencies: ActionDependencies, inputs: ActionInputs): boolean {
+  if (inputs.publishMode === 'action' || !isScansEndpoint(inputs.apiUrl)) return false
   let headSha: string
   try {
     headSha = dependencies.getHeadSha()
   } catch {
     return false
   }
-  const probe = dependencies.buildGitHubContext({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha, failOnViolations: false, scanKey: '.' })
+  const probe = dependencies.buildGitHubContext({ payload: dependencies.eventPayload(), env: dependencies.env(), headSha, scanKey: '.' })
   return probe !== undefined
 }
 
 // v0.1.1, apart from the check-run-url and publisher outputs and fail-on-violations, which no
 // longer fails the check or the job.
-async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
+async function runActionFlow(dependencies: ActionDependencies, read: InputsRead): Promise<void> {
   const { runtime } = dependencies
-  const apiKey = runtime.getInput('api-key')
-  if (apiKey) runtime.setSecret(apiKey)
-  let failOnScanError = runtime.getInput('fail-on-scan-error') === 'true'
+  const failOnScanError = 'inputs' in read ? read.inputs.failOnScanError : runtime.getInput('fail-on-scan-error') === 'true'
   let publisher: CheckPublisherLike | undefined
   let violationCount = 0
   let warningCount = 0
 
   try {
     const githubToken = runtime.getInput('github-token', { required: true })
-    runtime.setSecret(githubToken)
     const headSha = dependencies.getHeadSha()
     publisher = dependencies.createPublisher({ token: githubToken, headSha, name: CHECK_NAME })
     await publisher.start()
+    // As in v0.1.1, an invalid input concludes the check started above.
+    if ('inputsError' in read) throw read.inputsError
 
-    const inputs = dependencies.readInputs(runtime)
-    failOnScanError = inputs.failOnScanError
-    warnDeprecatedInput(runtime, inputs.failOnViolationsRaw)
+    const { inputs } = read
+    warnDeprecatedInput(runtime, inputs.failOnViolations)
     runtime.info(`Draftt scan: publish-mode action, endpoint ${endpointHost(inputs.apiUrl)}`)
 
     const workspaceRoot = dependencies.workspaceRoot()
@@ -150,8 +161,8 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
         await publisher.finish({ conclusion: dependencies.scanErrorConclusion(failOnScanError), title: ERROR_TITLE, summary: errorSummary(message) })
         concluded = true
         runtime.info(`Posted the error check: ${publisher.checkRunUrl ?? ''}`)
-      } catch {
-        runtime.warning('The Draftt GitHub Check could not be finalized.')
+      } catch (finishError) {
+        runtime.warning(`The Draftt GitHub Check could not be finalized: ${safeErrorMessage(finishError)}`)
       }
     }
     setOutputs(runtime, {
@@ -171,21 +182,15 @@ async function runActionFlow(dependencies: ActionDependencies): Promise<void> {
 // publish-mode server on a PR event against /v1/scans: the Draftt CI App publishes. This Action
 // creates no check before or during the request, and posts one completed (Action) check only when
 // the server did not publish, or when the request itself failed.
-async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
+async function runServerFlow(dependencies: ActionDependencies, inputs: ActionInputs): Promise<void> {
   const { runtime } = dependencies
-  const apiKey = runtime.getInput('api-key')
-  if (apiKey) runtime.setSecret(apiKey)
-  const githubToken = runtime.getInput('github-token') || undefined
-  if (githubToken) runtime.setSecret(githubToken)
-  let failOnScanError = runtime.getInput('fail-on-scan-error') === 'true'
+  const { failOnScanError, githubToken } = inputs
   const headSha = dependencies.getHeadSha()
   let violationCount = 0
   let warningCount = 0
 
   try {
-    const inputs = dependencies.readInputs(runtime)
-    failOnScanError = inputs.failOnScanError
-    warnDeprecatedInput(runtime, inputs.failOnViolationsRaw)
+    warnDeprecatedInput(runtime, inputs.failOnViolations)
 
     const workspaceRoot = dependencies.workspaceRoot()
     // An absolute terraform-root (e.g. ${{ github.workspace }}) is keyed relative to the same
@@ -207,7 +212,6 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       payload,
       env,
       headSha,
-      failOnViolations: inputs.failOnViolations,
       scanKey,
       ...(sourceMap ? { sourceMap } : {}),
     })
@@ -233,9 +237,9 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
       outputs = { ...outputs, annotations: response.annotationCount ?? 0, checkRunUrl: response.checkRunUrl, publisher: 'server' }
     } else {
       if (response.publishError) runtime.warning(`Draftt CI could not publish the check (${response.publishError.code}): ${response.publishError.message}`)
-      if (inputs.githubToken) {
+      if (githubToken) {
         try {
-          const fallback = dependencies.createPublisher({ token: inputs.githubToken, headSha, name: FALLBACK_CHECK_NAME })
+          const fallback = dependencies.createPublisher({ token: githubToken, headSha, name: FALLBACK_CHECK_NAME })
           await fallback.publishCompleted({
             conclusion: dependencies.violationConclusion(report.violationCount),
             title: report.title,
@@ -244,8 +248,8 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
           })
           outputs = { ...outputs, annotations: fallback.annotationCount, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
           runtime.info(`Posted the fallback check: ${outputs.checkRunUrl}`)
-        } catch {
-          runtime.warning('The Draftt fallback check could not be published.')
+        } catch (publishError) {
+          runtime.warning(`The Draftt fallback check could not be published: ${safeErrorMessage(publishError)}`)
         }
       } else if (!response.publishError) {
         runtime.warning('No check was published: Draftt CI reported neither a published check nor a publish error, and no github-token is available for a fallback check.')
@@ -264,8 +268,8 @@ async function runServerFlow(dependencies: ActionDependencies): Promise<void> {
         await fallback.publishCompleted({ conclusion: dependencies.scanErrorConclusion(failOnScanError), title: ERROR_TITLE, summary: errorSummary(message), annotations: [] })
         outputs = { ...outputs, checkRunUrl: fallback.checkRunUrl ?? '', publisher: 'action' }
         runtime.info(`Posted the error check: ${outputs.checkRunUrl}`)
-      } catch {
-        runtime.warning('The Draftt error check could not be published.')
+      } catch (publishError) {
+        runtime.warning(`The Draftt error check could not be published: ${safeErrorMessage(publishError)}`)
       }
     }
     setOutputs(runtime, outputs)
@@ -326,10 +330,10 @@ function logCompletion(runtime: ActionRuntime, outputs: Outputs): void {
   runtime.info(`Draftt scan completed (${counts}); ${check}`)
 }
 
-// fail-on-violations is a no-op in every flow. Printed once per run, right after the inputs are
-// read, and only when the input is true: false or unset changes nothing, so it says nothing.
-function warnDeprecatedInput(runtime: ActionRuntime, raw: ActionInputs['failOnViolationsRaw']): void {
-  if (raw === 'true') runtime.warning(DEPRECATION)
+// fail-on-violations is a no-op in every flow. Printed once per run, and only when the input is true:
+// false or unset changes nothing, so it says nothing.
+function warnDeprecatedInput(runtime: ActionRuntime, failOnViolations: boolean): void {
+  if (failOnViolations) runtime.warning(DEPRECATION)
 }
 
 function errorSummary(message: string): string {
@@ -381,8 +385,4 @@ function setOutputs(runtime: ActionRuntime, outputs: Outputs): void {
   runtime.setOutput('annotation-count', outputs.annotations)
   runtime.setOutput('check-run-url', outputs.checkRunUrl)
   runtime.setOutput('publisher', outputs.publisher)
-}
-
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Terraform policy scan failed'
 }

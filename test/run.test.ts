@@ -68,14 +68,8 @@ class FakePublisher implements CheckPublisherLike {
   readonly completed: Array<{ conclusion: CheckConclusion; title: string; annotations: number }> = []
   failFinish = false
   failCompleted = false
-  readonly events: string[]
-
-  constructor(events: string[]) {
-    this.events = events
-  }
 
   async start(): Promise<void> {
-    this.events.push('start')
     this.starts += 1
     this.checkRunUrl = 'https://github.com/o/r/runs/8'
   }
@@ -100,7 +94,6 @@ class FakePublisher implements CheckPublisherLike {
 interface HarnessOptions {
   externalFork?: boolean
   failOnViolations?: boolean
-  failOnViolationsRaw?: '' | 'true' | 'false'
   failOnScanError?: boolean
   terraformRoot?: string
   report?: ScanReport
@@ -122,18 +115,14 @@ function createHarness(options: HarnessOptions = {}): {
   dependencies: ActionDependencies
   runtime: FakeRuntime
   publisher: FakePublisher
-  events: string[]
   calls: { readInputs: number; readPlan: number; scan: number; githubContext: number; sourceMap: number; serializedGithub: Array<GitHubScanContext | undefined>; levels: AnnotationLevel[]; repositories: Array<ReportRepository | undefined> }
 } {
-  const failOnViolations = options.failOnViolations ?? false
   const failOnScanError = options.failOnScanError ?? false
   const apiUrl = options.apiUrl ?? 'https://draftt-ci.draftt.io/v1/scans'
   const runtimeInputs: Record<string, string> = { 'api-key': 'draftt-key', 'api-url': apiUrl, 'fail-on-scan-error': String(failOnScanError) }
   if (options.githubToken !== null) runtimeInputs['github-token'] = options.githubToken ?? 'github-token'
-  if (options.publishMode) runtimeInputs['publish-mode'] = options.publishMode
   const runtime = new FakeRuntime(runtimeInputs)
-  const events: string[] = []
-  const publisher = new FakePublisher(events)
+  const publisher = new FakePublisher()
   const calls = { readInputs: 0, readPlan: 0, scan: 0, githubContext: 0, sourceMap: 0, serializedGithub: [] as Array<GitHubScanContext | undefined>, levels: [] as AnnotationLevel[], repositories: [] as Array<ReportRepository | undefined> }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
@@ -141,8 +130,7 @@ function createHarness(options: HarnessOptions = {}): {
     apiKey: 'draftt-key',
     ...(options.githubToken === null ? {} : { githubToken: options.githubToken ?? 'github-token' }),
     terraformRoot: options.terraformRoot ?? '.',
-    failOnViolations,
-    failOnViolationsRaw: options.failOnViolationsRaw ?? (options.failOnViolations === undefined ? '' : options.failOnViolations ? 'true' : 'false'),
+    failOnViolations: options.failOnViolations ?? false,
     failOnScanError,
     publishMode: options.publishMode ?? 'server',
   }
@@ -155,7 +143,7 @@ function createHarness(options: HarnessOptions = {}): {
       path: 'main.tf',
       start_line: 1,
       end_line: 1,
-      annotation_level: failOnViolations ? 'failure' : 'warning',
+      annotation_level: 'warning',
       message: 'Violation',
       title: 'Draftt policy violation',
     }],
@@ -166,7 +154,6 @@ function createHarness(options: HarnessOptions = {}): {
   return {
     runtime,
     publisher,
-    events,
     calls,
     dependencies: {
       runtime,
@@ -177,7 +164,6 @@ function createHarness(options: HarnessOptions = {}): {
         return publisher
       },
       readInputs: () => {
-        events.push('readInputs')
         calls.readInputs += 1
         if (options.inputsError) throw options.inputsError
         return inputs
@@ -210,7 +196,6 @@ function createHarness(options: HarnessOptions = {}): {
           scanKey: input.scanKey,
           runId: 1,
           runAttempt: 1,
-          failOnViolations: input.failOnViolations,
           ...(input.sourceMap ? { sourceMap: input.sourceMap } : {}),
         }
       },
@@ -297,7 +282,7 @@ test('reports a Check finalization failure through scan-error behavior', async (
   await run(harness.dependencies)
 
   assert.equal(harness.runtime.outputs.get('scan-status'), 'error')
-  assert.ok(harness.runtime.warnings.includes('The Draftt GitHub Check could not be finalized.'))
+  assert.ok(harness.runtime.warnings.includes('The Draftt GitHub Check could not be finalized: GitHub finish failed'))
   assert.ok(harness.runtime.warnings.includes('GitHub finish failed'))
 })
 
@@ -440,7 +425,7 @@ test('a fallback publish failure is a warning, not a scan error', async () => {
   h.publisher.failCompleted = true
   await run(h.dependencies)
   assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'none' })
-  assert.ok(h.runtime.warnings.includes('The Draftt fallback check could not be published.'))
+  assert.ok(h.runtime.warnings.includes('The Draftt fallback check could not be published: GitHub create failed'))
 })
 
 test('server mode HTTP failure posts the (Action) error check when a token exists and honours fail-on-scan-error', async () => {
@@ -457,13 +442,6 @@ test('owner_mismatch surfaces the binding message', async () => {
   await run(h.dependencies)
   assert.ok(h.runtime.warnings.includes('Draftt CI is bound to a different GitHub organization'))
   assertOutputFields(h.runtime, { 'scan-status': 'error' })
-})
-
-test('server mode ignores fail-on-violations for the verdict but still sends it in the github block', async () => {
-  const h = createHarness({ failOnViolations: true, response: { checkRunUrl: 'https://github.com/o/r/runs/1' }, payload: PR })
-  await run(h.dependencies)
-  assert.deepEqual(h.runtime.failures, [])
-  assert.equal(h.calls.serializedGithub[0]?.failOnViolations, true)
 })
 
 test('a trailing slash on api-url still selects the server flow', async () => {
@@ -503,13 +481,17 @@ test('action mode on a PR keeps the v0.1.1 flow: in_progress check first, annota
   assertOutputFields(h.runtime, { 'scan-status': 'completed', publisher: 'action', 'annotation-count': 1 })
 })
 
-test('action mode starts the check before reading inputs, so a bad input still concludes it', async () => {
-  const h = createHarness({ publishMode: 'action', payload: PR, inputsError: new Error('policy-ids must be a JSON array of decimal-string ids') })
-  await run(h.dependencies)
-  assert.deepEqual(h.events, ['start', 'readInputs'])
-  assert.deepEqual(h.publisher.conclusions, ['neutral'])
-  assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action' })
-  assert.ok(h.runtime.warnings.includes('policy-ids must be a JSON array of decimal-string ids'))
+test('a bad input concludes the v0.1.1 check with the input error, whatever the publish mode', async () => {
+  for (const options of [{ publishMode: 'action' as const, payload: PR }, { payload: PR }] satisfies HarnessOptions[]) {
+    const h = createHarness({ ...options, inputsError: new Error('policy-ids must be a JSON array of decimal-string ids') })
+    await run(h.dependencies)
+    assert.deepEqual(h.publisher.names, [CHECK_NAME])
+    assert.equal(h.publisher.starts, 1)
+    assert.deepEqual(h.publisher.conclusions, ['neutral'])
+    assert.equal(h.calls.readPlan, 0)
+    assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'action', 'check-run-url': 'https://github.com/o/r/runs/8' })
+    assert.ok(h.runtime.warnings.includes('policy-ids must be a JSON array of decimal-string ids'))
+  }
 })
 
 test('action mode requires github-token', async () => {
@@ -614,13 +596,6 @@ test('an exhausted 429 or a 502 reaches the run as ScanRequestFailure with its s
   }
 })
 
-test('server mode sends failOnViolations false in the github block when enforcement is off', async () => {
-  const h = createHarness({ response: { checkRunUrl: 'https://github.com/o/r/runs/1' }, payload: PR })
-  await run(h.dependencies)
-  assert.equal(h.calls.serializedGithub[0]?.failOnViolations, false)
-  assert.deepEqual(h.runtime.failures, [])
-})
-
 test('the fallback check concludes neutral for violations and the job passes', async () => {
   const h = createHarness({ response: { publishError: { code: 'github_unavailable', message: 'm' } }, payload: PR })
   await run(h.dependencies)
@@ -635,7 +610,7 @@ test('an error check that cannot be posted is a warning and stays fail-open', as
   const h = createHarness({ scanError: new Error('Draftt could not complete the scan'), payload: PR })
   h.publisher.failCompleted = true
   await run(h.dependencies)
-  assert.ok(h.runtime.warnings.includes('The Draftt error check could not be published.'))
+  assert.ok(h.runtime.warnings.includes('The Draftt error check could not be published: GitHub create failed'))
   assert.ok(h.runtime.warnings.includes('Draftt could not complete the scan'))
   assertOutputFields(h.runtime, { 'scan-status': 'error', publisher: 'none', 'check-run-url': '' })
   assert.deepEqual(h.runtime.failures, [])
@@ -773,7 +748,7 @@ test('fail-on-violations true prints the deprecation line and the job passes', a
   }
 })
 
-test('the deprecation line prints once even when the scan errors, and never for false or unset', async () => {
+test('the deprecation line prints once even when the scan errors, and never when false', async () => {
   const serverError = createHarness({ failOnViolations: true, scanError: new Error('Draftt could not complete the scan'), payload: PR })
   await run(serverError.dependencies)
   assert.deepEqual(deprecations(serverError.runtime), [DEPRECATION])
@@ -782,12 +757,10 @@ test('the deprecation line prints once even when the scan errors, and never for 
   await run(actionError.dependencies)
   assert.deepEqual(deprecations(actionError.runtime), [DEPRECATION])
 
-  for (const raw of ['false', ''] as const) {
-    for (const options of [{ payload: PR }, { publishMode: 'action' as const, payload: PR }, {}] satisfies HarnessOptions[]) {
-      const h = createHarness({ ...options, failOnViolationsRaw: raw, failOnViolations: false })
-      await run(h.dependencies)
-      assert.deepEqual(deprecations(h.runtime), [], `${raw} ${JSON.stringify(options)}`)
-    }
+  for (const options of [{ payload: PR }, { publishMode: 'action' as const, payload: PR }, {}] satisfies HarnessOptions[]) {
+    const h = createHarness({ ...options, failOnViolations: false })
+    await run(h.dependencies)
+    assert.deepEqual(deprecations(h.runtime), [], JSON.stringify(options))
   }
 })
 

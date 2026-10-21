@@ -16,3 +16,7 @@ export function requireBoolean(value: unknown, field: string): boolean {
   if (typeof value !== 'boolean') throw new Error(`Invalid API response: ${field}`)
   return value
 }
+
+export function safeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Terraform policy scan failed'
+}
