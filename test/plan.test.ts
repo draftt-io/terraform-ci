@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { MAX_PLAN_BYTES, MAX_PLAN_FILE_BYTES, readAndSanitizePlan, sanitizePlan, serializeScanRequest } from '../src/plan.ts'
+import type { SourceLocator } from '../src/report.ts'
+import { buildSourceMap, MAX_SOURCE_MAP_ENTRIES } from '../src/source-map.ts'
 
 function basePlan(): Record<string, unknown> {
   return {
@@ -360,4 +362,34 @@ test('strips assume_role_policy when marked sensitive', () => {
   assert.equal(serialized.includes('assume_role_policy'), false)
   assert.equal(serialized.includes('sts:AssumeRole'), false)
   assert.ok(serialized.includes('"max_session_duration":3600'))
+})
+
+test('the source map keys exact plan addresses of retained managed resources and stops at the server entry limit', async () => {
+  const known: Record<string, { path: string; startLine: number }> = {
+    'module.a["k"].aws_s3_bucket.b[0]': { path: 'modules/a/main.tf', startLine: 3 },
+    'aws_instance.web': { path: 'ec2.tf', startLine: 10 },
+  }
+  const locator: SourceLocator = {
+    async locate(reference) {
+      const location = known[reference.address]
+      return location ? { kind: 'found', location } : { kind: 'unresolved', reason: 'missing_declaration' }
+    },
+  }
+  const plan = {
+    format_version: '1.2',
+    resource_changes: [
+      { address: 'module.a["k"].aws_s3_bucket.b[0]', mode: 'managed', change: { actions: ['create'] } },
+      { address: 'aws_instance.web', mode: 'managed', change: { actions: ['no-op'] } },
+      { address: 'aws_instance.gone', mode: 'managed', change: { actions: ['delete'] } },
+      { address: 'data.aws_caller_identity.me', mode: 'data', change: { actions: ['read'] } },
+      { address: 'aws_db_instance.unknown', mode: 'managed', change: { actions: ['update'] } },
+    ],
+  }
+  assert.deepEqual(await buildSourceMap(plan, locator), { sourceMap: known, capped: false })
+
+  const resourceChanges = Array.from({ length: MAX_SOURCE_MAP_ENTRIES + 1 }, (_, index) => ({ address: `aws_instance.web_${index}`, mode: 'managed', change: { actions: ['create'] } }))
+  const everyAddress: SourceLocator = { locate: async () => ({ kind: 'found', location: { path: 'ec2.tf', startLine: 1 } }) }
+  const capped = await buildSourceMap({ format_version: '1.2', resource_changes: resourceChanges }, everyAddress)
+  assert.equal(capped.capped, true)
+  assert.equal(Object.keys(capped.sourceMap).length, MAX_SOURCE_MAP_ENTRIES)
 })

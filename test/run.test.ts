@@ -431,3 +431,23 @@ test('path:line links point at the head commit of the payload repository, or of 
     assert.deepEqual(h.calls.repositories, [repository], JSON.stringify(options))
   }
 })
+
+test('the github block is built from a pull_request payload, and not for other events or a missing, zero or non-decimal id', () => {
+  const env = { GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2', GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'draftt-io/infra' }
+  const payload = { pull_request: { number: 7 }, repository: { id: 10, owner: { id: 20 } } }
+  const base = { env, headSha: HEAD_SHA, scanKey: 'modules/eks' }
+  assert.deepEqual(buildGitHubContext({ ...base, payload, sourceMap: { 'a.b': { path: 'a.tf', startLine: 1 } } }), {
+    repositoryId: 10, repositoryOwnerId: 20, pullRequestNumber: 7, headSha: HEAD_SHA, scanKey: 'modules/eks', runId: 42, runAttempt: 2,
+    workflowRunUrl: 'https://github.com/draftt-io/infra/actions/runs/42',
+    sourceMap: { 'a.b': { path: 'a.tf', startLine: 1 } },
+  })
+  const invalid = [
+    { repository: payload.repository },
+    { merge_group: { head_sha: HEAD_SHA }, repository: payload.repository },
+    { pull_request: { number: 7 } },
+    { ...payload, pull_request: { number: 0 } },
+    { ...payload, repository: { id: 0, owner: { id: 20 } } },
+  ]
+  for (const bad of invalid) assert.equal(buildGitHubContext({ ...base, payload: bad }), undefined, JSON.stringify(bad))
+  for (const runId of ['0', ' 42 ', '0x2a', '42.0', '']) assert.equal(buildGitHubContext({ ...base, env: { ...env, GITHUB_RUN_ID: runId }, payload }), undefined, runId)
+})
