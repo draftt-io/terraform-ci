@@ -24,19 +24,17 @@ export class CheckPublisher {
   readonly #repo: string
   readonly #headSha: string
   readonly #name: string
-  readonly #warning: (message: string) => void
   #checkRunId: number | undefined
   #checkRunUrl: string | undefined
   #publishedAnnotations = 0
 
-  constructor(token: string, headSha = getHeadSha(), name = CHECK_NAME, options: { warning?: (message: string) => void } = {}) {
+  constructor(token: string, headSha = getHeadSha(), name = CHECK_NAME) {
     this.#octokit = getOctokit(token)
     const repository = context.repo
     this.#owner = repository.owner
     this.#repo = repository.repo
     this.#headSha = headSha
     this.#name = name
-    this.#warning = options.warning ?? core.warning
   }
 
   get annotationCount(): number {
@@ -123,7 +121,7 @@ export class CheckPublisher {
           output: { title, summary, annotations: batch },
         })
       } catch {
-        this.#warning(`Only ${this.#publishedAnnotations} of ${annotations.length} annotations could be added to the Draftt check.`)
+        core.warning(`Only ${this.#publishedAnnotations} of ${annotations.length} annotations could be added to the Draftt check.`)
         return
       }
       this.#publishedAnnotations += batch.length

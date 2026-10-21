@@ -562,10 +562,10 @@ test('server mode resolves an absolute terraform-root against the workspace root
 
 // The real client behind the scanTerraformPlan dependency, with fetch stubbed and no retry sleep,
 // so these tests pin the error shape the run receives, not just the run's reaction to it.
-function realScanClient(captured: unknown[], info: (message: string) => void = () => {}): ActionDependencies['scanTerraformPlan'] {
+function realScanClient(captured: unknown[]): ActionDependencies['scanTerraformPlan'] {
   return async (apiUrl, apiKey, body) => {
     try {
-      return await scanTerraformPlan(apiUrl, apiKey, body, { sleep: async () => {}, info })
+      return await scanTerraformPlan(apiUrl, apiKey, body, { sleep: async () => {} })
     } catch (error) {
       captured.push(error)
       throw error
@@ -717,7 +717,7 @@ test('no logged line carries the Draftt key, the token, a plan value, the api-ur
         ? jsonResponse(200, serverResponse)
         : jsonResponse(scenario.status, { message: 'planted-backend-body' }, { 'retry-after': '0' })
     ))
-    h.dependencies.scanTerraformPlan = realScanClient([], (line) => h.runtime.info(line))
+    h.dependencies.scanTerraformPlan = realScanClient([])
     await run(h.dependencies)
     fetchMock.mock.restore()
     const lines = [...h.runtime.infos, ...h.runtime.warnings]

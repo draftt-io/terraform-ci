@@ -12,7 +12,6 @@ const MAPPED_ACTIONS = new Set(['create', 'update', 'no-op'])
 export async function buildSourceMap(
   plan: SanitizedPlan,
   locator: SourceLocator,
-  limit = MAX_SOURCE_MAP_ENTRIES,
 ): Promise<{ sourceMap: Record<string, SourceMapEntry>; capped: boolean }> {
   const sourceMap: Record<string, SourceMapEntry> = {}
   let entries = 0
@@ -23,7 +22,7 @@ export async function buildSourceMap(
     if (!actions.some((action) => MAPPED_ACTIONS.has(action))) continue
     const mapping = await locator.locate({ address: resource.address })
     if (mapping.kind !== 'found') continue
-    if (entries >= limit) return { sourceMap, capped: true }
+    if (entries >= MAX_SOURCE_MAP_ENTRIES) return { sourceMap, capped: true }
     sourceMap[resource.address] = { path: mapping.location.path, startLine: mapping.location.startLine }
     entries += 1
   }

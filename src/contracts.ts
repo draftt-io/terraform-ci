@@ -52,7 +52,7 @@ export interface ScanResponse {
   publishError?: { code: string; message: string }
 }
 
-export function parseScanResponse(value: unknown, options: { serverUrl?: string } = {}): ScanResponse {
+export function parseScanResponse(value: unknown): ScanResponse {
   if (!isRecord(value)) invalid('root')
   const summary = record(value.summary, 'summary')
   const evaluation = record(value.evaluation, 'evaluation')
@@ -112,7 +112,7 @@ export function parseScanResponse(value: unknown, options: { serverUrl?: string 
     },
   }
 
-  const serverHost = safeHost(options.serverUrl ?? process.env.GITHUB_SERVER_URL ?? 'https://github.com')
+  const serverHost = safeHost(process.env.GITHUB_SERVER_URL ?? 'https://github.com')
   const checkRunUrl = typeof value.checkRunUrl === 'string' && isTrustedCheckRunUrl(value.checkRunUrl, serverHost) ? value.checkRunUrl : undefined
   const annotationCount = optionalCount(value.annotationCount)
   // The server sends publishError: null when publishing succeeded; only a well-formed object is an error.

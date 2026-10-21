@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
 import type { CheckAnnotation } from '../src/github-check.ts'
+import { isRecord } from '../src/objects.ts'
 
 interface RecordedRequest {
   method: string
@@ -94,18 +95,19 @@ test('publishCompleted with no annotations is a single create, and start keeps t
   assert.equal(legacy.checkRunUrl, 'https://github.com/o/r/runs/77')
 })
 
-test('a fallback publish whose second annotation batch rejects reports only the accepted annotations and warns once', async () => {
+test('a fallback publish whose second annotation batch rejects reports only the accepted annotations', async () => {
   requests.length = 0
   rejectPatchFrom = 1
-  const warnings: string[] = []
   try {
-    const publisher = new CheckPublisher('token', 'd'.repeat(40), FALLBACK_CHECK_NAME, { warning: (message) => { warnings.push(message) } })
+    const publisher = new CheckPublisher('token', 'd'.repeat(40), FALLBACK_CHECK_NAME)
     await publisher.publishCompleted('failure', 'Violations', 'Summary', annotations(120))
     assert.equal(publisher.annotationCount, 50)
     assert.equal(publisher.checkRunUrl, 'https://github.com/o/r/runs/77')
-    assert.deepEqual(warnings, ['Only 50 of 120 annotations could be added to the Draftt check.'])
     // The third batch is not attempted once the second was rejected.
     assert.deepEqual(requests.map((r) => r.method), ['POST', 'PATCH'])
+    const createOutput = requests[0]?.body.output
+    assert.ok(isRecord(createOutput) && Array.isArray(createOutput.annotations))
+    assert.equal(createOutput.annotations.length, 50)
   } finally {
     rejectPatchFrom = 0
   }

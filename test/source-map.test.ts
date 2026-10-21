@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SourceLocator } from '../src/report.ts'
-import { buildSourceMap } from '../src/source-map.ts'
+import { buildSourceMap, MAX_SOURCE_MAP_ENTRIES } from '../src/source-map.ts'
 
 const locator: SourceLocator = {
   async locate(reference) {
@@ -49,15 +49,15 @@ test('a derived component (EBS from aws_instance) gets no key of its own: only t
   assert.deepEqual(sourceMap, { 'aws_instance.web': { path: 'ec2.tf', startLine: 10 } })
 })
 
-test('stops at the entry limit and reports the cap', async () => {
-  const plan = {
-    format_version: '1.2',
-    resource_changes: [
-      { address: 'module.a["k"].aws_s3_bucket.b[0]', mode: 'managed', change: { actions: ['create'] } },
-      { address: 'aws_instance.web', mode: 'managed', change: { actions: ['create'] } },
-    ],
+test("stops at the server's limit of 100000 entries and reports the cap", async () => {
+  const resourceChanges = Array.from({ length: MAX_SOURCE_MAP_ENTRIES + 1 }, (_, index) => ({ address: `aws_instance.web_${index}`, mode: 'managed', change: { actions: ['create'] } }))
+  const everyAddress: SourceLocator = {
+    async locate() {
+      return { kind: 'found', location: { path: 'ec2.tf', startLine: 1 } }
+    },
   }
-  const { sourceMap, capped } = await buildSourceMap(plan, locator, 1)
+  const { sourceMap, capped } = await buildSourceMap({ format_version: '1.2', resource_changes: resourceChanges }, everyAddress)
   assert.equal(capped, true)
-  assert.deepEqual(Object.keys(sourceMap), ['module.a["k"].aws_s3_bucket.b[0]'])
+  assert.equal(Object.keys(sourceMap).length, MAX_SOURCE_MAP_ENTRIES)
+  assert.equal(Object.hasOwn(sourceMap, `aws_instance.web_${MAX_SOURCE_MAP_ENTRIES}`), false)
 })

@@ -9,8 +9,8 @@ const REQUEST_TIMEOUT_MS = 310 * 1000
 const MAX_ATTEMPTS = 3
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
 
-export const GZIP_THRESHOLD_BYTES = 1024 * 1024
-export const MAX_RETRY_AFTER_MS = 60_000
+const GZIP_THRESHOLD_BYTES = 1024 * 1024
+const MAX_RETRY_AFTER_MS = 60_000
 
 export class ScanRequestFailure extends Error {
   readonly status: number | undefined
@@ -35,10 +35,10 @@ export function isScansEndpoint(apiUrl: string): boolean {
 }
 
 // Retry-After as delta-seconds or an HTTP date, capped so one answer cannot stall the job.
-export function retryAfterMs(value: string | null, now = Date.now()): number | undefined {
+export function retryAfterMs(value: string | null): number | undefined {
   if (value === null || value.trim() === '') return undefined
   const seconds = Number(value)
-  const milliseconds = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now
+  const milliseconds = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now()
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return undefined
   return Math.min(milliseconds, MAX_RETRY_AFTER_MS)
 }
@@ -47,13 +47,13 @@ export async function scanTerraformPlan(
   apiUrl: string,
   apiKey: string,
   body: string,
-  options: { gzipThresholdBytes?: number; sleep?: (ms: number) => Promise<void>; info?: (message: string) => void } = {},
+  // Replaceable only so the tests do not wait the real backoff (up to 1.5 s per exhausted retry).
+  options: { sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<ScanResponse> {
   const endpoint = validateEndpoint(apiUrl)
-  const info = options.info ?? core.info
   const deadline = Date.now() + TOTAL_TIMEOUT_MS
   let lastFailure = 'Draftt scan request failed'
-  const compress = isScansEndpoint(apiUrl) && Buffer.byteLength(body) > (options.gzipThresholdBytes ?? GZIP_THRESHOLD_BYTES)
+  const compress = isScansEndpoint(apiUrl) && Buffer.byteLength(body) > GZIP_THRESHOLD_BYTES
   const payload = compress ? gzipSync(body) : body
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
@@ -102,7 +102,7 @@ export async function scanTerraformPlan(
       if (attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
     }
     const wait = Math.min(retryDelay, Math.max(0, deadline - Date.now()))
-    info(`${retryReason}, retrying in ${Math.round(wait / 100) / 10} s (attempt ${attempt + 1} of ${MAX_ATTEMPTS})`)
+    core.info(`${retryReason}, retrying in ${Math.round(wait / 100) / 10} s (attempt ${attempt + 1} of ${MAX_ATTEMPTS})`)
     await (options.sleep ?? delay)(wait)
   }
   throw new Error(lastFailure)

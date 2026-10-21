@@ -71,7 +71,14 @@ test('parses the v2 publish fields and keeps a github.com check run url', () => 
 test('drops a check run url that is not https on github.com or the server host, and still accepts a v0.1.1 body', () => {
   assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'http://github.com/x' }).checkRunUrl, undefined)
   assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://evil.test/x' }).checkRunUrl, undefined)
-  assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://ghe.corp/x' }, { serverUrl: 'https://ghe.corp' }).checkRunUrl, 'https://ghe.corp/x')
+  const serverUrl = process.env.GITHUB_SERVER_URL
+  process.env.GITHUB_SERVER_URL = 'https://ghe.example.test'
+  try {
+    assert.equal(parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://ghe.example.test/x' }).checkRunUrl, 'https://ghe.example.test/x')
+  } finally {
+    if (serverUrl === undefined) delete process.env.GITHUB_SERVER_URL
+    else process.env.GITHUB_SERVER_URL = serverUrl
+  }
   assert.equal(parseScanResponse({ ...scanResponse(), annotationCount: -1, publishError: { code: 1 } }).annotationCount, undefined)
   assert.equal(parseScanResponse(scanResponse()).publishError, undefined)
 })
