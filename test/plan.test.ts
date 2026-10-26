@@ -251,7 +251,7 @@ test('rejects an unmarked recognized credential left in a retained field', () =>
 })
 
 test('serializes explicit empty policy selection', () => {
-  const body = JSON.parse(serializeScanRequest(sanitizePlan(basePlan()), []).body) as Record<string, unknown>
+  const body = JSON.parse(serializeScanRequest({ plan: sanitizePlan(basePlan()), policyIds: [] }).body) as Record<string, unknown>
   assert.deepEqual(body.policyIds, [])
 })
 
@@ -316,27 +316,30 @@ test('serializeScanRequest drops the source map first when the body would exceed
   // A plan just under the 49 MiB plan cap: the plan alone fits, the plan plus a 1.3 MB map does not.
   const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
   const sourceMap = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`r.${i}`, { path: 'x'.repeat(100), startLine: 1 }]))
-  const github = { repositoryId: 1, repositoryOwnerId: 2, pullRequestNumber: 3, headSha: 'a'.repeat(40), scanKey: '.', runId: 1, runAttempt: 1, sourceMap }
-  const { body, sourceMapDropped } = serializeScanRequest(plan, undefined, github)
+  const source = { provider: 'github', repositoryId: 1, ownerId: 2, pullRequestNumber: 3, commitSha: 'a'.repeat(40), scanKey: '.', runId: 1, runAttempt: 1 } as const
+  const { body, sourceMapDropped } = serializeScanRequest({ plan, source, sourceMap })
   assert.equal(sourceMapDropped, true)
-  assert.equal(JSON.parse(body).github.sourceMap, undefined)
-  assert.equal(JSON.parse(body).github.scanKey, '.')
+  assert.equal(JSON.parse(body).sourceMap, undefined)
+  assert.deepEqual(JSON.parse(body).source, source)
 
   const small = { format_version: '1.2', resource_changes: [{ address: 'a.b', change: { after: { name: 'café "q" \\' } } }] }
-  const smallGithub = { ...github, sourceMap: { 'a.b': { path: 'a.tf', startLine: 1 } } }
-  assert.deepEqual(serializeScanRequest(small, ['1'], smallGithub), { body: JSON.stringify({ plan: small, policyIds: ['1'], github: smallGithub }), sourceMapDropped: false })
+  const smallMap = { 'a.b': { path: 'a.tf', startLine: 1 } }
+  assert.deepEqual(serializeScanRequest({ plan: small, policyIds: ['1'], source, sourceMap: smallMap }), {
+    body: JSON.stringify({ plan: small, policyIds: ['1'], sourceMap: smallMap, source }),
+    sourceMapDropped: false,
+  })
 })
 
 test('refuses a serialized plan over 49 MiB, and a request over 50 MiB even when the plan fits', () => {
   const oversizedPlan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(Math.round(49.5 * 1024 * 1024)) }] }
   assert.throws(
-    () => serializeScanRequest(oversizedPlan, undefined),
+    () => serializeScanRequest({ plan: oversizedPlan }),
     (error: unknown) => error instanceof Error && error.message === 'The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.',
   )
   const plan = { format_version: '1.2', resource_changes: [{ padding: 'x'.repeat(MAX_PLAN_BYTES - 50_000) }] }
   // About 1.3 MB of policy ids push the request over 50 MiB; there is no source map to drop.
   const policyIds = Array.from({ length: 100_000 }, (_, i) => String(1_000_000_000 + i))
-  assert.throws(() => serializeScanRequest(plan, policyIds), /Scrubbed scan request exceeds the 50 MiB request limit/)
+  assert.throws(() => serializeScanRequest({ plan, policyIds }), /Scrubbed scan request exceeds the 50 MiB request limit/)
 })
 
 test('strips assume_role_policy when marked sensitive', () => {

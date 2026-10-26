@@ -3,8 +3,8 @@ import test from 'node:test'
 import type { ScanResponse } from '../src/contracts.ts'
 import { scanTerraformPlan } from '../src/api.ts'
 import type { ActionInputs } from '../src/inputs.ts'
-import type { SanitizedPlan } from '../src/plan.ts'
-import { buildGitHubContext, isExternalFork, type GitHubScanContext } from '../src/request.ts'
+import type { SanitizedPlan, ScanRequest } from '../src/plan.ts'
+import { buildScanSource, isExternalFork } from '../src/request.ts'
 import { run, type ActionDependencies, type ActionRuntime } from '../src/run.ts'
 import type { WorkspaceSourceStatus } from '../src/workspace.ts'
 import { scanResponse } from './fixtures.ts'
@@ -72,12 +72,12 @@ const HEAD_SHA = '1111111111111111111111111111111111111111'
 function createHarness(options: HarnessOptions = {}): {
   dependencies: ActionDependencies
   runtime: FakeRuntime
-  calls: { readInputs: number; readPlan: number; scan: number; serializedGithub: Array<GitHubScanContext | undefined> }
+  calls: { readInputs: number; readPlan: number; scan: number; serialized: ScanRequest[] }
 } {
   const failOnScanError = options.failOnScanError ?? false
   const apiUrl = 'https://ci.example.test/ci/scans'
   const runtime = new FakeRuntime({ 'api-key': 'draftt-key', 'api-url': apiUrl, 'fail-on-scan-error': String(failOnScanError) })
-  const calls = { readInputs: 0, readPlan: 0, scan: 0, serializedGithub: [] as Array<GitHubScanContext | undefined> }
+  const calls = { readInputs: 0, readPlan: 0, scan: 0, serialized: [] as ScanRequest[] }
   const inputs: ActionInputs = {
     planJson: 'plan.json',
     apiUrl,
@@ -102,8 +102,8 @@ function createHarness(options: HarnessOptions = {}): {
         if (options.planError) throw options.planError
         return plan
       },
-      serializeScanRequest: (_plan, _policyIds, github) => {
-        calls.serializedGithub.push(github)
+      serializeScanRequest: (request) => {
+        calls.serialized.push(request)
         return { body: '{"plan":{}}', sourceMapDropped: false }
       },
       inspectWorkspaceForSourceMapping: async () => options.workspaceStatus ?? 'matched',
@@ -111,7 +111,7 @@ function createHarness(options: HarnessOptions = {}): {
         locate: async () => ({ kind: 'unresolved', reason: 'missing_declaration' }),
       }),
       buildSourceMap: async () => ({ sourceMap: { 'aws_db_instance.primary': { path: 'main.tf', startLine: 1 } }, capped: false }),
-      buildGitHubContext,
+      buildScanSource,
       eventPayload: () => options.payload ?? {},
       env: () => options.env ?? { GITHUB_RUN_ID: '1', GITHUB_SHA: HEAD_SHA },
       scanTerraformPlan: async () => {
@@ -159,8 +159,8 @@ test('a pull request upload carries the scan key and source map and reports the 
   await run(h.dependencies)
 
   assert.deepEqual(h.runtime.secrets, ['draftt-key'])
-  assert.equal(h.calls.serializedGithub[0]?.scanKey, '.')
-  assert.deepEqual(h.calls.serializedGithub[0]?.sourceMap, { 'aws_db_instance.primary': { path: 'main.tf', startLine: 1 } })
+  assert.equal(h.calls.serialized[0]?.source?.scanKey, '.')
+  assert.deepEqual(h.calls.serialized[0]?.sourceMap, { 'aws_db_instance.primary': { path: 'main.tf', startLine: 1 } })
   assert.ok(h.runtime.warnings.includes('Draftt CI published the check but could not finish (comment): comment failed'))
   assertOutputFields(h.runtime, { 'scan-status': 'completed', 'violation-count': 1, 'warning-count': 3, 'annotation-count': 4, 'check-run-url': RUN_URL })
   assert.ok(h.runtime.summaries[0]?.includes(`- Check run: ${RUN_URL}`))
@@ -175,7 +175,7 @@ test('a push event, or a pull request the App did not publish, completes with co
   for (const [options, pullRequest] of cases) {
     const h = createHarness(options)
     await run(h.dependencies)
-    assert.equal(h.calls.serializedGithub[0] !== undefined, pullRequest)
+    assert.equal(h.calls.serialized[0]?.source !== undefined, pullRequest)
     assertOutputFields(h.runtime, { 'scan-status': 'completed', 'violation-count': 1, 'annotation-count': 0, 'check-run-url': '' })
     assert.ok(h.runtime.summaries[0]?.includes('- Check run: none published'))
     assert.deepEqual(h.runtime.failures, [])
@@ -207,7 +207,7 @@ test('explains why the source map is not sent', async () => {
     const harness = createHarness({ workspaceStatus, payload: PR })
     await run(harness.dependencies)
     assert.ok(harness.runtime.warnings.some((warning) => warning.includes(message)))
-    assert.equal(harness.calls.serializedGithub[0]?.sourceMap, undefined)
+    assert.equal(harness.calls.serialized[0]?.sourceMap, undefined)
   }
 })
 
@@ -253,13 +253,13 @@ test('each HTTP failure, with fail-on-scan-error, fails the job with its user me
   }
 })
 
-test('the github block is built from a pull_request payload, and not for other events or a missing, zero or non-decimal id', () => {
+test('the github source is built from a pull_request payload, and not for other events or a missing, zero or non-decimal id', () => {
   const env = { GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2', GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'draftt-io/infra' }
   const payload = { pull_request: { number: 7 }, repository: { id: 10, owner: { id: 20 } } }
   const base = { env, headSha: HEAD_SHA, scanKey: 'modules/eks' }
-  assert.deepEqual(buildGitHubContext({ ...base, payload }), {
-    repositoryId: 10, repositoryOwnerId: 20, pullRequestNumber: 7, headSha: HEAD_SHA, scanKey: 'modules/eks', runId: 42, runAttempt: 2,
-    workflowRunUrl: 'https://github.com/draftt-io/infra/actions/runs/42',
+  assert.deepEqual(buildScanSource({ ...base, payload }), {
+    provider: 'github', repositoryId: 10, ownerId: 20, pullRequestNumber: 7, commitSha: HEAD_SHA, scanKey: 'modules/eks', runId: 42, runAttempt: 2,
+    runUrl: 'https://github.com/draftt-io/infra/actions/runs/42',
   })
   const invalid = [
     { repository: payload.repository },
@@ -268,6 +268,6 @@ test('the github block is built from a pull_request payload, and not for other e
     { ...payload, pull_request: { number: 0 } },
     { ...payload, repository: { id: 0, owner: { id: 20 } } },
   ]
-  for (const bad of invalid) assert.equal(buildGitHubContext({ ...base, payload: bad }), undefined, JSON.stringify(bad))
-  for (const runId of ['0', ' 42 ', '0x2a', '42.0', '']) assert.equal(buildGitHubContext({ ...base, env: { ...env, GITHUB_RUN_ID: runId }, payload }), undefined, runId)
+  for (const bad of invalid) assert.equal(buildScanSource({ ...base, payload: bad }), undefined, JSON.stringify(bad))
+  for (const runId of ['0', ' 42 ', '0x2a', '42.0', '']) assert.equal(buildScanSource({ ...base, env: { ...env, GITHUB_RUN_ID: runId }, payload }), undefined, runId)
 })

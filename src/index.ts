@@ -5,7 +5,7 @@ import { scanTerraformPlan } from './api.ts'
 import { readInputs } from './inputs.ts'
 import { isRecord } from './objects.ts'
 import { readAndSanitizePlan, serializeScanRequest } from './plan.ts'
-import { buildGitHubContext } from './request.ts'
+import { buildScanSource } from './request.ts'
 import { run } from './run.ts'
 import { buildSourceMap } from './source-map.ts'
 import { TerraformSourceLocator } from './source-locator.ts'
@@ -31,7 +31,7 @@ void run({
     await TerraformSourceLocator.create({ workspaceRoot, terraformRoot })
   ),
   buildSourceMap,
-  buildGitHubContext,
+  buildScanSource,
   eventPayload: readEventPayload,
   env: () => process.env,
   scanTerraformPlan,

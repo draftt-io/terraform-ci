@@ -5,46 +5,48 @@ export interface SourceMapEntry {
   startLine: number
 }
 
-export interface GitHubScanContext {
+// Where the plan comes from: the pull request Draftt CI publishes its check and comment on.
+export interface ScanSource {
+  provider: 'github'
   repositoryId: number
-  repositoryOwnerId: number
+  ownerId: number
   pullRequestNumber: number
-  headSha: string
+  commitSha: string
   scanKey: string
   runId: number
   runAttempt: number
-  workflowRunUrl?: string
-  sourceMap?: Record<string, SourceMapEntry>
+  runUrl?: string
 }
 
-// Only pull_request and pull_request_target payloads carry a PR number; other events get no block,
+// Only pull_request and pull_request_target payloads carry a PR number; other events get no source,
 // and Draftt CI then scans without publishing to GitHub.
-export function buildGitHubContext(input: {
+export function buildScanSource(input: {
   payload: Record<string, unknown>
   env: NodeJS.ProcessEnv
   headSha: string
   scanKey: string
-}): GitHubScanContext | undefined {
+}): ScanSource | undefined {
   const pullRequest = isRecord(input.payload.pull_request) ? input.payload.pull_request : undefined
   const pullRequestNumber = positiveInteger(pullRequest?.number)
   if (pullRequestNumber === undefined) return undefined
   const repository = isRecord(input.payload.repository) ? input.payload.repository : {}
   const owner = isRecord(repository.owner) ? repository.owner : {}
   const repositoryId = positiveInteger(repository.id) ?? positiveInteger(input.env.GITHUB_REPOSITORY_ID)
-  const repositoryOwnerId = positiveInteger(owner.id) ?? positiveInteger(input.env.GITHUB_REPOSITORY_OWNER_ID)
+  const ownerId = positiveInteger(owner.id) ?? positiveInteger(input.env.GITHUB_REPOSITORY_OWNER_ID)
   const runId = positiveInteger(input.env.GITHUB_RUN_ID)
-  if (repositoryId === undefined || repositoryOwnerId === undefined || runId === undefined) return undefined
+  if (repositoryId === undefined || ownerId === undefined || runId === undefined) return undefined
   const runAttempt = positiveInteger(input.env.GITHUB_RUN_ATTEMPT) ?? 1
-  const workflowRunUrl = buildWorkflowRunUrl(input.env, runId)
+  const runUrl = buildRunUrl(input.env, runId)
   return {
+    provider: 'github',
     repositoryId,
-    repositoryOwnerId,
+    ownerId,
     pullRequestNumber,
-    headSha: input.headSha,
+    commitSha: input.headSha,
     scanKey: input.scanKey,
     runId,
     runAttempt,
-    ...(workflowRunUrl ? { workflowRunUrl } : {}),
+    ...(runUrl ? { runUrl } : {}),
   }
 }
 
@@ -70,8 +72,8 @@ function repositoryFullName(reference: unknown): string | undefined {
   return typeof repository.full_name === 'string' ? repository.full_name : undefined
 }
 
-// The server rejects a non-https workflowRunUrl with 422 (validation); it is optional, so omit it rather than fail the upload.
-function buildWorkflowRunUrl(env: NodeJS.ProcessEnv, runId: number): string | undefined {
+// The server rejects a non-https runUrl with 422 (validation); it is optional, so omit it rather than fail the upload.
+function buildRunUrl(env: NodeJS.ProcessEnv, runId: number): string | undefined {
   if (!env.GITHUB_SERVER_URL || !env.GITHUB_REPOSITORY) return undefined
   const url = `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${runId}`
   return url.startsWith('https://') ? url : undefined

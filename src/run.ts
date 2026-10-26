@@ -1,8 +1,8 @@
 import type { ScanResponse } from './contracts.ts'
 import { scanKeyFromTerraformRoot, type ActionInputs, type InputReader } from './inputs.ts'
 import { safeErrorMessage } from './objects.ts'
-import type { SanitizedPlan } from './plan.ts'
-import { headShaOf, isExternalFork, type GitHubScanContext, type SourceMapEntry } from './request.ts'
+import type { SanitizedPlan, ScanRequest } from './plan.ts'
+import { headShaOf, isExternalFork, type ScanSource, type SourceMapEntry } from './request.ts'
 import type { SourceLocator } from './source-locator.ts'
 import { MAX_SOURCE_MAP_ENTRIES } from './source-map.ts'
 import type { WorkspaceSourceStatus } from './workspace.ts'
@@ -31,11 +31,11 @@ export interface ActionDependencies {
   runtime: ActionRuntime
   readInputs(runtime: InputReader): ActionInputs
   readAndSanitizePlan(planPath: string, workspaceRoot: string): Promise<SanitizedPlan>
-  serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined, github?: GitHubScanContext): { body: string; sourceMapDropped: boolean }
+  serializeScanRequest(request: ScanRequest): { body: string; sourceMapDropped: boolean }
   inspectWorkspaceForSourceMapping(workspaceRoot: string, expectedSha: string): Promise<WorkspaceSourceStatus>
   createSourceLocator(workspaceRoot: string, terraformRoot: string): Promise<SourceLocator>
   buildSourceMap(plan: SanitizedPlan, locator: SourceLocator): Promise<{ sourceMap: Record<string, SourceMapEntry>; capped: boolean }>
-  buildGitHubContext(input: { payload: Record<string, unknown>; env: NodeJS.ProcessEnv; headSha: string; scanKey: string }): GitHubScanContext | undefined
+  buildScanSource(input: { payload: Record<string, unknown>; env: NodeJS.ProcessEnv; headSha: string; scanKey: string }): ScanSource | undefined
   eventPayload(): Record<string, unknown>
   env(): NodeJS.ProcessEnv
   scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse>
@@ -69,24 +69,29 @@ export async function run(dependencies: ActionDependencies): Promise<void> {
     runtime.info(`Draftt scan: endpoint ${new URL(inputs.apiUrl).host}, scan key ${scanKey}`)
     const plan = await dependencies.readAndSanitizePlan(inputs.planJson, workspaceRoot)
 
-    const github = dependencies.buildGitHubContext({ payload, env, headSha, scanKey })
-    if (github) {
-      const sourceMap = await sourceMapFor(dependencies, { plan, workspaceRoot, headSha, terraformRoot: inputs.terraformRoot })
-      if (sourceMap) github.sourceMap = sourceMap
+    const source = dependencies.buildScanSource({ payload, env, headSha, scanKey })
+    let sourceMap: Record<string, SourceMapEntry> | undefined
+    if (source) {
+      sourceMap = await sourceMapFor(dependencies, { plan, workspaceRoot, headSha, terraformRoot: inputs.terraformRoot })
     } else {
       runtime.info('Not a pull request event: Draftt CI scans the plan and publishes no check or PR comment.')
     }
     if (env.GITHUB_EVENT_NAME === 'pull_request_target') {
       runtime.info('On pull_request_target the planned code runs with access to the Draftt key; prefer pull_request.')
     }
-    const { body, sourceMapDropped } = dependencies.serializeScanRequest(plan, inputs.policyIds, github)
+    const { body, sourceMapDropped } = dependencies.serializeScanRequest({
+      plan,
+      ...(inputs.policyIds === undefined ? {} : { policyIds: inputs.policyIds }),
+      ...(source ? { source } : {}),
+      ...(sourceMap ? { sourceMap } : {}),
+    })
     if (sourceMapDropped) runtime.warning('The source map was dropped to keep the upload under 50 MiB; findings will remain in the Check summary.')
 
     const response = await dependencies.scanTerraformPlan(inputs.apiUrl, inputs.apiKey, body)
     if (response.publishError) {
       const outcome = response.checkRunUrl ? 'published the check but could not finish' : 'could not publish the check'
       runtime.warning(`Draftt CI ${outcome} (${response.publishError.code}): ${response.publishError.message}`)
-    } else if (github && !response.checkRunUrl) {
+    } else if (source && !response.checkRunUrl) {
       runtime.warning('No check was published: Draftt CI reported neither a published check nor a publish error.')
     }
     const outputs: Outputs = {
