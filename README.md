@@ -20,9 +20,21 @@ name: Terraform policy scan
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "**/*.tf"
+      - "**/*.tf.json"
+      - "**/*.tfvars"
+      - "**/*.tfvars.json"
+      - "**/*.tofu"
+      - "**/*.tofu.json"
+      - "**/.terraform.lock.hcl"
 
 permissions:
   contents: read
+
+concurrency:
+  group: draftt-terraform-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   policy-scan:
