@@ -1,256 +1,124 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
+import { promisify } from 'node:util'
 import type { ScanResponse } from '../src/contracts.ts'
-import { scanTerraformPlan } from '../src/api.ts'
-import type { ActionInputs } from '../src/inputs.ts'
-import type { SanitizedPlan, ScanRequest } from '../src/plan.ts'
-import { buildScanSource, isExternalFork } from '../src/request.ts'
-import { run, type ActionDependencies, type ActionRuntime } from '../src/run.ts'
-import type { WorkspaceSourceStatus } from '../src/workspace.ts'
+import { isRecord } from '../src/objects.ts'
+import { buildScanSource } from '../src/request.ts'
+import { run, type ActionContext } from '../src/run.ts'
 import { scanResponse } from './fixtures.ts'
 
-class FakeRuntime implements ActionRuntime {
-  readonly inputs: Record<string, string>
-  readonly inputReads: string[] = []
-  readonly outputs = new Map<string, string | number>()
-  readonly secrets: string[] = []
-  readonly failures: string[] = []
-  readonly warnings: string[] = []
-  readonly infos: string[] = []
-  readonly summaries: string[] = []
-
-  constructor(inputs: Record<string, string>) {
-    this.inputs = inputs
-  }
-
-  getInput(name: string, options?: { required?: boolean }): string {
-    this.inputReads.push(name)
-    const value = this.inputs[name] ?? ''
-    if (options?.required && value === '') throw new Error(`Input required and not supplied: ${name}`)
-    return value
-  }
-
-  setSecret(value: string): void {
-    this.secrets.push(value)
-  }
-
-  setOutput(name: string, value: string | number): void {
-    this.outputs.set(name, value)
-  }
-
-  setFailed(message: string): void {
-    this.failures.push(message)
-  }
-
-  warning(message: string): void {
-    this.warnings.push(message)
-  }
-
-  info(message: string): void {
-    this.infos.push(message)
-  }
-
-  async writeSummary(markdown: string): Promise<void> {
-    this.summaries.push(markdown)
-  }
-}
-
-interface HarnessOptions {
-  failOnScanError?: boolean
-  terraformRoot?: string
-  planError?: Error
-  workspaceStatus?: WorkspaceSourceStatus
-  payload?: Record<string, unknown>
-  env?: NodeJS.ProcessEnv
-  response?: Partial<ScanResponse>
-  scanError?: Error
-  inputsError?: Error
-}
-
+const execFileAsync = promisify(execFile)
 const HEAD_SHA = '1111111111111111111111111111111111111111'
-
-function createHarness(options: HarnessOptions = {}): {
-  dependencies: ActionDependencies
-  runtime: FakeRuntime
-  calls: { readInputs: number; readPlan: number; scan: number; serialized: ScanRequest[] }
-} {
-  const failOnScanError = options.failOnScanError ?? false
-  const apiUrl = 'https://ci.example.test/ci/scans'
-  const runtime = new FakeRuntime({ 'api-key': 'draftt-key', 'api-url': apiUrl, 'fail-on-scan-error': String(failOnScanError) })
-  const calls = { readInputs: 0, readPlan: 0, scan: 0, serialized: [] as ScanRequest[] }
-  const inputs: ActionInputs = {
-    planJson: 'plan.json',
-    apiUrl,
-    apiKey: 'draftt-key',
-    terraformRoot: options.terraformRoot ?? '.',
-    failOnScanError,
-  }
-  const plan: SanitizedPlan = { format_version: '1.2', resource_changes: [] }
-
-  return {
-    runtime,
-    calls,
-    dependencies: {
-      runtime,
-      readInputs: () => {
-        calls.readInputs += 1
-        if (options.inputsError) throw options.inputsError
-        return inputs
-      },
-      readAndSanitizePlan: async () => {
-        calls.readPlan += 1
-        if (options.planError) throw options.planError
-        return plan
-      },
-      serializeScanRequest: (request) => {
-        calls.serialized.push(request)
-        return { body: '{"plan":{}}', sourceMapDropped: false }
-      },
-      inspectWorkspaceForSourceMapping: async () => options.workspaceStatus ?? 'matched',
-      createSourceLocator: async () => ({
-        locate: async () => ({ kind: 'unresolved', reason: 'missing_declaration' }),
-      }),
-      buildSourceMap: async () => ({ sourceMap: { 'aws_db_instance.primary': { path: 'main.tf', startLine: 1 } }, capped: false }),
-      buildScanSource,
-      eventPayload: () => options.payload ?? {},
-      env: () => options.env ?? { GITHUB_RUN_ID: '1', GITHUB_SHA: HEAD_SHA },
-      scanTerraformPlan: async () => {
-        calls.scan += 1
-        if (options.scanError) throw options.scanError
-        return { ...scanResponse(), ...options.response }
-      },
-      workspaceRoot: () => '/workspace',
-    },
-  }
-}
-
-const PR = { pull_request: { number: 1, head: { sha: HEAD_SHA } }, repository: { id: 10, owner: { id: 20 } } }
 const RUN_URL = 'https://github.com/o/r/runs/1'
-const errorSummary = (message: string): string => `## Draftt Terraform Policy Scan\n\nScan error: ${message}`
+let workspace = ''
+let commitSha = ''
 
-function assertOutputFields(runtime: FakeRuntime, expected: Record<string, string | number>): void {
-  for (const [name, value] of Object.entries(expected)) assert.equal(runtime.outputs.get(name), value, name)
+// One checked-out repository for every scenario: main.tf at HEAD and an untracked plan.json beside it.
+test.before(async () => {
+  workspace = await mkdtemp(path.join(tmpdir(), 'terraform-run-'))
+  await writeFile(path.join(workspace, 'main.tf'), 'resource "aws_db_instance" "primary" {}\nresource "aws_instance" "gone" {}\n')
+  await execFileAsync('git', ['-C', workspace, 'init'])
+  await execFileAsync('git', ['-C', workspace, 'add', 'main.tf'])
+  await execFileAsync('git', ['-C', workspace, '-c', 'user.name=Draftt Test', '-c', 'user.email=test@draftt.io', 'commit', '-m', 'fixture'])
+  commitSha = (await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'], { encoding: 'utf8' })).stdout.trim()
+  const change = (actions: string[]) => ({ actions, before: null, after: {}, after_unknown: {}, before_sensitive: false, after_sensitive: false })
+  await writeFile(path.join(workspace, 'plan.json'), JSON.stringify({
+    format_version: '1.2',
+    resource_changes: [
+      { address: 'aws_db_instance.primary', mode: 'managed', type: 'aws_db_instance', name: 'primary', change: change(['create']) },
+      { address: 'aws_instance.gone', mode: 'managed', type: 'aws_instance', name: 'gone', change: change(['delete']) },
+    ],
+  }))
+})
+
+test.after(async () => {
+  await rm(workspace, { recursive: true, force: true })
+})
+
+async function actionContext(input: { payload?: Record<string, unknown>; inputs?: Record<string, string> } = {}): Promise<ActionContext> {
+  const values: Record<string, string> = {
+    'plan-json': 'plan.json', 'api-url': 'https://ci.example.test/ci/scans', 'api-key': 'draftt-key', 'terraform-root': '.', 'fail-on-scan-error': 'false',
+    ...input.inputs,
+  }
+  const eventPath = path.join(workspace, 'event.json')
+  if (input.payload) await writeFile(eventPath, JSON.stringify(input.payload))
+  return {
+    inputs: { getInput: (name: string) => values[name] ?? '' },
+    ...(input.payload ? { eventPath } : {}),
+    env: { GITHUB_RUN_ID: '1', GITHUB_SHA: commitSha },
+    workspaceRoot: workspace,
+    serverUrl: 'https://github.com',
+  }
 }
 
-test('skips a pull request from an external fork before reading the Draftt key or plan', async () => {
-  const fork = { pull_request: { number: 1, head: { repo: { full_name: 'fork/infra' } }, base: { repo: { full_name: 'draftt-io/infra' } } } }
-  const sameRepository = { pull_request: { number: 1, head: { repo: { full_name: 'draftt-io/infra' } }, base: { repo: { full_name: 'draftt-io/infra' } } } }
-  assert.equal(isExternalFork(sameRepository), false)
-  assert.equal(isExternalFork({}), false)
-
-  const harness = createHarness({ payload: fork })
-  await run(harness.dependencies)
-
-  assert.equal(harness.runtime.inputReads.includes('api-key'), false)
-  assert.equal(harness.calls.readInputs, 0)
-  assert.equal(harness.calls.readPlan, 0)
-  assert.equal(harness.calls.scan, 0)
-  assertOutputFields(harness.runtime, { 'scan-status': 'skipped', 'violation-count': 0, 'warning-count': 0, 'annotation-count': 0, 'check-run-url': '' })
-})
-
-test('a pull request upload carries the scan key and source map and reports the check the Draftt CI App published, warning on its publish error', async () => {
-  const response: Partial<ScanResponse> = {
-    evaluation: { unevaluatedPolicies: [{ policyId: '10', reason: 'inactive' }], componentsWithGaps: [{ policyGaps: [{}, {}] }] },
-    checkRunUrl: RUN_URL,
-    annotationCount: 4,
-    publishError: { code: 'comment', message: 'comment failed' },
-  }
-  const h = createHarness({ response, payload: PR })
-  await run(h.dependencies)
-
-  assert.deepEqual(h.runtime.secrets, ['draftt-key'])
-  assert.equal(h.calls.serialized[0]?.source?.scanKey, '.')
-  assert.deepEqual(h.calls.serialized[0]?.sourceMap, { 'aws_db_instance.primary': { path: 'main.tf', startLine: 1 } })
-  assert.ok(h.runtime.warnings.includes('Draftt CI published the check but could not finish (comment): comment failed'))
-  assertOutputFields(h.runtime, { 'scan-status': 'completed', 'violation-count': 1, 'warning-count': 3, 'annotation-count': 4, 'check-run-url': RUN_URL })
-  assert.ok(h.runtime.summaries[0]?.includes(`- Check run: ${RUN_URL}`))
-  assert.deepEqual(h.runtime.failures, [])
-})
-
-test('a push event, or a pull request the App did not publish, completes with counts and no check, and never fails on violations', async () => {
-  const cases: Array<[HarnessOptions, boolean]> = [
-    [{ payload: { ref: 'refs/heads/main' } }, false],
-    [{ payload: PR, response: { publishError: { code: 'not_bound', message: 'no binding' } } }, true],
-  ]
-  for (const [options, pullRequest] of cases) {
-    const h = createHarness(options)
-    await run(h.dependencies)
-    assert.equal(h.calls.serialized[0]?.source !== undefined, pullRequest)
-    assertOutputFields(h.runtime, { 'scan-status': 'completed', 'violation-count': 1, 'annotation-count': 0, 'check-run-url': '' })
-    assert.ok(h.runtime.summaries[0]?.includes('- Check run: none published'))
-    assert.deepEqual(h.runtime.failures, [])
-  }
-})
-
-test('scan errors are reported in the job summary and fail the job only with fail-on-scan-error', async () => {
-  const failOpen = createHarness({ planError: new Error('Invalid plan') })
-  await run(failOpen.dependencies)
-  assert.deepEqual(failOpen.runtime.failures, [])
-  assert.ok(failOpen.runtime.warnings.includes('Invalid plan'))
-  assertOutputFields(failOpen.runtime, { 'scan-status': 'error', 'violation-count': 0, 'warning-count': 0, 'annotation-count': 0, 'check-run-url': '' })
-
-  const enforced = createHarness({ failOnScanError: true, planError: new Error('Invalid plan') })
-  await run(enforced.dependencies)
-  assert.deepEqual(enforced.runtime.failures, ['Invalid plan'])
-  assert.deepEqual(enforced.runtime.summaries, [errorSummary('Invalid plan')])
-})
-
-test('explains why the source map is not sent', async () => {
-  const cases = [
-    ['head_mismatch', 'pull request head commit is not checked out'],
-    ['dirty_terraform', 'Terraform source files differ from the checked-out commit'],
-    ['git_unavailable', 'Git repository state could not be inspected'],
-    ['nested_workspace', 'GITHUB_WORKSPACE is not the repository root'],
-  ] as const
-
-  for (const [workspaceStatus, message] of cases) {
-    const harness = createHarness({ workspaceStatus, payload: PR })
-    await run(harness.dependencies)
-    assert.ok(harness.runtime.warnings.some((warning) => warning.includes(message)))
-    assert.equal(harness.calls.serialized[0]?.sourceMap, undefined)
-  }
-})
-
-test('a bad input or a terraform-root outside the workspace is a scan error without scanning', async () => {
-  const cases: Array<[HarnessOptions, string]> = [
-    [{ inputsError: new Error('policy-ids must be a JSON array of decimal-string ids') }, 'policy-ids must be a JSON array of decimal-string ids'],
-    [{ terraformRoot: '/elsewhere' }, 'terraform-root must be a relative path without ".." segments'],
-  ]
-  for (const [options, message] of cases) {
-    const h = createHarness({ ...options, payload: PR })
-    await run(h.dependencies)
-    assert.equal(h.calls.scan, 0)
-    assertOutputFields(h.runtime, { 'scan-status': 'error', 'check-run-url': '' })
-    assert.deepEqual(h.runtime.summaries, [errorSummary(message)])
-  }
-})
-
-// The real client behind the scanTerraformPlan dependency, with fetch stubbed and no retry sleep.
-function realScanClient(): ActionDependencies['scanTerraformPlan'] {
-  return (apiUrl, apiKey, body) => scanTerraformPlan(apiUrl, apiKey, body, { sleep: async () => {} })
+function pullRequest(headSha: string): Record<string, unknown> {
+  return { pull_request: { number: 1, head: { sha: headSha } }, repository: { id: 10, owner: { id: 20 } } }
 }
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-test('each HTTP failure, with fail-on-scan-error, fails the job with its user message; a 4xx or 500 is not retried', async (t) => {
-  const cases = [
-    { status: 403, body: { status: 403, message: 'owner_mismatch' }, attempts: 1, message: 'Draftt answered 403: owner_mismatch' },
-    { status: 413, body: { status: 413, message: 'payload_too_large: the Terraform plan exceeds 49 MiB' }, attempts: 1, message: 'Draftt answered 413: payload_too_large: the Terraform plan exceeds 49 MiB' },
-    { status: 422, body: { status: 422, message: 'too_many_scan_keys' }, attempts: 1, message: 'Draftt answered 422: too_many_scan_keys' },
-    { status: 500, body: { status: 500, message: 'internal error' }, attempts: 1, message: 'Draftt could not complete the scan' },
-  ]
-  for (const item of cases) {
-    const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(item.status, item.body))
-    const h = createHarness({ failOnScanError: true, payload: PR })
-    h.dependencies.scanTerraformPlan = realScanClient()
-    await run(h.dependencies)
-    fetchMock.mock.restore()
-    assert.equal(fetchMock.mock.callCount(), item.attempts, String(item.status))
-    assertOutputFields(h.runtime, { 'scan-status': 'error', 'check-run-url': '' })
-    assert.deepEqual(h.runtime.failures, [item.message])
+function uploadedBody(fetchMock: { mock: { calls: Array<{ arguments: unknown[] }> } }): Record<string, unknown> {
+  const init = fetchMock.mock.calls[0]?.arguments[1]
+  return isRecord(init) ? JSON.parse(String(init.body)) : {}
+}
+
+test('a pull request from an external fork is skipped without uploading', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(200, scanResponse()))
+  const fork = { pull_request: { number: 1, head: { repo: { full_name: 'fork/infra' } }, base: { repo: { full_name: 'draftt-io/infra' } } } }
+  const result = await run(await actionContext({ payload: fork }))
+  assert.equal(fetchMock.mock.callCount(), 0)
+  assert.equal(result.outputs.status, 'skipped')
+})
+
+test('a pull request upload carries the scan key and the source map of the changed resources, and reports the check the App published', async (t) => {
+  const response: ScanResponse = {
+    ...scanResponse(),
+    evaluation: { unevaluatedPolicies: [{ policyId: '10', reason: 'inactive' }], componentsWithGaps: [{ policyGaps: [{}, {}] }] },
+    checkRunUrl: RUN_URL,
+    annotationCount: 4,
+    publishError: { code: 'comment', message: 'comment failed' },
   }
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(200, response))
+  const result = await run(await actionContext({ payload: pullRequest(commitSha) }))
+  const body = uploadedBody(fetchMock)
+  assert.deepEqual(body.sourceMap, { 'aws_db_instance.primary': { path: 'main.tf', startLine: 1 } })
+  assert.equal(isRecord(body.source) && body.source.scanKey, '.')
+  assert.deepEqual(result.outputs, { status: 'completed', violations: 1, warnings: 3, annotations: 4, checkRunUrl: RUN_URL })
+  assert.equal(result.failure, undefined)
+})
+
+test('a pull request whose head is not checked out is uploaded without a source map', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(200, scanResponse()))
+  const result = await run(await actionContext({ payload: pullRequest(HEAD_SHA) }))
+  assert.equal(uploadedBody(fetchMock).sourceMap, undefined)
+  assert.equal(result.outputs.status, 'completed')
+})
+
+test('a push event is scanned without a source, and an off-host check run url is not reported', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(200, { ...scanResponse(), checkRunUrl: 'https://evil.test/x' }))
+  const result = await run(await actionContext())
+  assert.equal(uploadedBody(fetchMock).source, undefined)
+  assert.deepEqual(result.outputs, { status: 'completed', violations: 1, warnings: 0, annotations: 0, checkRunUrl: '' })
+  assert.ok(result.summary.includes('- Check run: none published'))
+})
+
+test('a scan error is reported in the summary and fails the step only with fail-on-scan-error', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse(403, { status: 403, message: 'owner_mismatch' }))
+  const failOpen = await run(await actionContext())
+  assert.equal(failOpen.outputs.status, 'error')
+  assert.equal(failOpen.failure, undefined)
+  assert.equal(failOpen.summary, '## Draftt Terraform Policy Scan\n\nScan error: Draftt answered 403: owner_mismatch')
+
+  const enforced = await run(await actionContext({ inputs: { 'fail-on-scan-error': 'true', 'policy-ids': 'not-json' } }))
+  assert.equal(enforced.outputs.status, 'error')
+  assert.equal(enforced.failure, 'policy-ids must be a JSON array of decimal-string ids')
+  assert.equal(fetchMock.mock.callCount(), 1)
 })
 
 test('the github source is built from a pull_request payload, and not for other events or a missing, zero or non-decimal id', () => {

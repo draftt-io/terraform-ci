@@ -79,7 +79,7 @@ Outputs contain counts and the check URL only, never plan data, policy details, 
 - The scan key is `terraform-root` as a workspace-relative POSIX path, `.` for the repository root: letters, digits, `.`, `_`, `/` and `-`, at most 200 characters, no `..` segments. Use one `terraform-root` per root module to get one check and one comment per module.
 - A commit takes at most 50 scan keys. Uploads are deduplicated on `runId:runAttempt:scanKey`, so two scans in one workflow run attempt (matrix jobs included) must use different roots.
 - The App annotates changed lines only when the Action can send a map from resource address to file and line. It sends none when the pull request head is not checked out, Terraform files differ from the commit, `GITHUB_WORKSPACE` is not the repository root, Git cannot be inspected, or the map would push the request over 50 MiB; the findings then stay in the check summary and the PR comment. The map is capped at 100,000 resources.
-- Pull requests from external forks are skipped without reading the plan or the Draftt key.
+- Pull requests from external forks are skipped without reading the plan or uploading anything.
 - On `pull_request_target` the planned code runs with access to the Draftt key; prefer `pull_request`.
 
 ## Requests and errors
@@ -96,7 +96,7 @@ The API key belongs to the Draftt organization: a workflow in any repository tha
 
 ## Logs
 
-The job log shows the `api-url` host (never its path or query) and the scan key, each retry wait (for example `Draftt answered 502, retrying in 0.5 s (attempt 2 of 3)`), any publish error the App reported, and on completion the violation, warning and annotation counts and the check URL. The API key, plan values and Draftt response bodies are never logged, except the service's message on a `401`, `403`, `413` or `422`.
+The job log shows the `api-url` host (never its path or query) and the scan key, each retry wait (for example `Draftt answered 502, retrying in 0.5 s (attempt 2 of 3)`), any publish error the App reported, and on completion the violation, warning and annotation counts and the check URL. The API key, plan values and Draftt response bodies are never logged, except the service's message on a `4xx` or a `502`.
 
 ## Development
 

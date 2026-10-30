@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-export interface ActionInputs {
+interface ActionInputs {
   planJson: string
   apiUrl: string
   apiKey: string

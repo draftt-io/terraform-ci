@@ -1,5 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises'
 import { gzipSync } from 'node:zlib'
-import * as core from '@actions/core'
 import { parseScanResponse, type ScanResponse } from './contracts.ts'
 import { isRecord } from './objects.ts'
 
@@ -8,21 +8,22 @@ const REQUEST_TIMEOUT_MS = 310 * 1000
 const MAX_ATTEMPTS = 3
 const GZIP_THRESHOLD_BYTES = 1024 * 1024
 
-export async function scanTerraformPlan(
-  apiUrl: string,
-  apiKey: string,
-  body: string,
-  // Replaceable only so the tests do not wait the real backoff (up to 1.5 s per exhausted retry).
-  options: { sleep?: (ms: number) => Promise<void> } = {},
-): Promise<ScanResponse> {
+export async function scanTerraformPlan(apiUrl: string, apiKey: string, body: string): Promise<ScanResponse> {
   const deadline = Date.now() + TOTAL_TIMEOUT_MS
-  let lastFailure = 'Draftt scan request failed'
   const compress = Buffer.byteLength(body) > GZIP_THRESHOLD_BYTES
   const payload = compress ? gzipSync(body) : body
+  // Only the status or a fixed failure kind is logged, never the backend body or the error detail.
+  let lastFailure = 'Draftt scan request failed'
+  let retryReason = 'Draftt request failed'
+  let attempt = 0
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    // Only the status or a fixed failure kind is logged, never the backend body or the error detail.
-    let retryReason = 'Draftt request failed'
+  do {
+    if (attempt > 0) {
+      const wait = Math.min(attempt * 500, Math.max(0, deadline - Date.now()))
+      console.info(`${retryReason}, retrying in ${Math.round(wait / 100) / 10} s (attempt ${attempt + 1} of ${MAX_ATTEMPTS})`)
+      await delay(wait)
+    }
+    attempt += 1
     const remaining = deadline - Date.now()
     if (remaining <= 0) throw new Error('Draftt scan request timed out')
     try {
@@ -53,18 +54,14 @@ export async function scanTerraformPlan(
       const serviceMessage = showsMessage ? await errorMessageOf(response) : undefined
       lastFailure = publicStatusMessage(response.status, serviceMessage)
       retryReason = `Draftt answered ${response.status}`
-      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
+      if (!RETRYABLE_STATUS.has(response.status)) throw new Error(lastFailure)
     } catch (error) {
       if (error instanceof Error && !isRetryableNetworkError(error)) throw error
       const timedOut = error instanceof Error && error.name === 'TimeoutError'
       lastFailure = timedOut ? 'Draftt scan request timed out' : 'Draftt scan request failed'
       retryReason = timedOut ? 'Draftt request timed out' : 'Draftt request failed'
-      if (attempt === MAX_ATTEMPTS) throw new Error(lastFailure)
     }
-    const wait = Math.min(attempt * 500, Math.max(0, deadline - Date.now()))
-    core.info(`${retryReason}, retrying in ${Math.round(wait / 100) / 10} s (attempt ${attempt + 1} of ${MAX_ATTEMPTS})`)
-    await (options.sleep ?? delay)(wait)
-  }
+  } while (attempt < MAX_ATTEMPTS)
   throw new Error(lastFailure)
 }
 
@@ -95,8 +92,4 @@ function publicStatusMessage(status: number, serviceMessage: string | undefined)
 
 function isRetryableNetworkError(error: Error): boolean {
   return error instanceof TypeError || error.name === 'TimeoutError' || error.name === 'AbortError'
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }

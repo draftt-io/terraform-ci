@@ -34,8 +34,8 @@ test('parses the publish fields', () => {
   assert.equal('publishError' in parseScanResponse({ ...scanResponse(), publishError: null }), false)
 })
 
-test('drops an off-host check run url and malformed optional values, keeping the rest of the response', () => {
-  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://evil.test/x', annotationCount: -1, publishError: { code: 1 } })
+test('drops malformed optional values, keeping the rest of the response', () => {
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 1, annotationCount: -1, publishError: { code: 1 } })
   for (const field of ['checkRunUrl', 'annotationCount', 'publishError'] as const) assert.equal(parsed[field], undefined, field)
   assert.equal(parsed.components.length, 1)
 })

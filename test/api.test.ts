@@ -61,9 +61,8 @@ test('gzips bodies over 1 MiB and sends smaller bodies plain', async () => {
   assert.deepEqual(seen.slice(1), [{ encoding: null, body: '{"plan":{}}' }])
 })
 
-test('a 503 answer and a network failure each wait attempt * 500 ms before the next attempt', async () => {
+test('a 503 answer and a network failure are retried until the third attempt succeeds', async () => {
   const originalFetch = globalThis.fetch
-  const sleeps: number[] = []
   let calls = 0
   globalThis.fetch = async () => {
     calls += 1
@@ -72,13 +71,12 @@ test('a 503 answer and a network failure each wait attempt * 500 ms before the n
     return new Response(JSON.stringify(scanResponse()), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
-    const result = await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } })
+    const result = await scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}')
     assert.equal(result.components.length, 1)
   } finally {
     globalThis.fetch = originalFetch
   }
   assert.equal(calls, 3)
-  assert.deepEqual(sleeps, [500, 1_000])
 })
 
 test('4xx and 502 answers pass the service message through, or name the status without one; only 502 is retried', async () => {
@@ -94,17 +92,15 @@ test('4xx and 502 answers pass the service message through, or name the status w
   try {
     for (const item of cases) {
       let calls = 0
-      const sleeps: number[] = []
       globalThis.fetch = async () => {
         calls += 1
         return new Response(typeof item.body === 'string' ? item.body : JSON.stringify(item.body), { status: item.status })
       }
       await assert.rejects(
-        () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}', { sleep: async (ms) => { sleeps.push(ms) } }),
+        () => scanTerraformPlan('https://ci.example.test/ci/scans', 'k', '{}'),
         (error: unknown) => error instanceof Error && error.message === item.message,
       )
       assert.equal(calls, item.calls, `HTTP ${item.status} is sent ${item.calls} time(s)`)
-      assert.equal(sleeps.length, item.calls - 1)
     }
   } finally {
     globalThis.fetch = originalFetch

@@ -9,7 +9,7 @@ export const MAX_PLAN_FILE_BYTES = 50 * MiB
 // The scrubbed plan as the service measures it, JSON.stringify(plan).
 export const MAX_PLAN_BYTES = 49 * MiB
 // The whole request body, before gzip.
-export const MAX_REQUEST_BYTES = 50 * MiB
+const MAX_REQUEST_BYTES = 50 * MiB
 
 const PLAN_TOO_LARGE = 'The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.'
 
@@ -220,7 +220,7 @@ function validateExpectedSensitiveFields(value: unknown, path: string, fieldName
   }
 }
 
-export interface ScanRequest {
+interface ScanRequest {
   plan: SanitizedPlan
   policyIds?: string[]
   source?: ScanSource

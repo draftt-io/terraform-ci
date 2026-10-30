@@ -20,8 +20,7 @@ export function parseScanResponse(value: unknown): ScanResponse {
   const response = requireObject(value, 'root')
   const evaluation = requireObject(response.evaluation, 'evaluation')
   const coverage = requireObject(response.coverage, 'coverage')
-  const serverHost = safeHost(process.env.GITHUB_SERVER_URL ?? 'https://github.com')
-  const checkRunUrl = typeof response.checkRunUrl === 'string' && isTrustedCheckRunUrl(response.checkRunUrl, serverHost) ? response.checkRunUrl : undefined
+  const checkRunUrl = typeof response.checkRunUrl === 'string' ? response.checkRunUrl : undefined
   const annotationCount = optionalCount(response.annotationCount)
   // The server sends publishError: null when publishing succeeded; only a well-formed object is an error.
   const publishError = isRecord(response.publishError) && typeof response.publishError.code === 'string' && typeof response.publishError.message === 'string'
@@ -41,24 +40,6 @@ export function parseScanResponse(value: unknown): ScanResponse {
     ...(checkRunUrl ? { checkRunUrl } : {}),
     ...(annotationCount === undefined ? {} : { annotationCount }),
     ...(publishError ? { publishError } : {}),
-  }
-}
-
-function safeHost(url: string): string | undefined {
-  try {
-    return new URL(url).host
-  } catch {
-    return undefined
-  }
-}
-
-// The URL lands in the job summary and the check-run-url output, so only a GitHub check link is kept.
-function isTrustedCheckRunUrl(value: string, serverHost: string | undefined): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && (url.host === 'github.com' || url.host === serverHost)
-  } catch {
-    return false
   }
 }
 
