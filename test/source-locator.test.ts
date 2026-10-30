@@ -60,19 +60,6 @@ test('follows nested local modules and ignores module instance keys', async () =
   )
 })
 
-test('uses sourceAddress for derived components', async () => {
-  await withRepository(
-    { 'instances.tf': 'resource "aws_instance" "web" {}\n' },
-    async (repository) => {
-      const locator = await TerraformSourceLocator.create({ workspaceRoot: repository, terraformRoot: '.' })
-      assert.deepEqual(
-        await locator.locate({ address: 'aws_ebs_volume.web_data', sourceAddress: 'aws_instance.web' }),
-        found('instances.tf', 1),
-      )
-    },
-  )
-})
-
 test('maps an external module finding to its editable module block', async () => {
   await withRepository(
     { 'main.tf': 'module "network" {\n  source = "hashicorp/vpc/aws"\n}\n' },

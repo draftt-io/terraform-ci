@@ -1,141 +1,63 @@
-import { isRecord, requireBoolean, requireNumber, requireString } from './objects.ts'
+import { isRecord } from './objects.ts'
 
-export interface PolicyHit {
-  policyName: string
-  status: string
-  desiredVersion?: string
-  recommendedVersion?: string
-  hasForceUpgrade?: boolean
-  impendingDate?: string
-  outdatedDate?: string
-  dueDate?: string
-}
-
-export interface FlaggedComponent {
-  address: string
-  sourceAddress?: string
-  tfType: string
-  technology: string
-  type: string
-  currentVersion: string
-  policyComponents: PolicyHit[]
-}
-
+// The parts of the Draftt CI scan answer the Action reports: the flagged components, the checks that could not
+// run, and what the Draftt CI App published on the pull request. Everything else in the answer is ignored.
 export interface ScanResponse {
-  summary: {
-    managedResourcesInPlan: number
-    componentsMapped: number
-    hasPolicyViolations: boolean
-  }
-  components: FlaggedComponent[]
+  components: unknown[]
   evaluation: {
-    unevaluatedPolicies: Array<{ policyId: string; name?: string; reason: string }>
-    componentsWithGaps: Array<{
-      address: string
-      policyGaps: Array<{ policyName: string; reason: string }>
-    }>
+    unevaluatedPolicies: unknown[]
+    componentsWithGaps: Array<{ policyGaps: unknown[] }>
   }
   coverage: {
-    unmappedResources: Array<{ address: string; reason: string }>
-    mergedResources: unknown[]
-    skippedResources: unknown[]
+    unmappedResources: unknown[]
   }
+  checkRunUrl?: string
+  annotationCount?: number
+  publishError?: { code: string; message: string }
 }
 
 export function parseScanResponse(value: unknown): ScanResponse {
-  if (!isRecord(value)) invalid('root')
-  const summary = record(value.summary, 'summary')
-  const evaluation = record(value.evaluation, 'evaluation')
-  const coverage = record(value.coverage, 'coverage')
-  const components = array(value.components, 'components').map(parseFlaggedComponent)
-  const hasPolicyViolations = requireBoolean(summary.hasPolicyViolations, 'summary.hasPolicyViolations')
-  if (hasPolicyViolations !== (components.length > 0)) invalid('summary.hasPolicyViolations')
-
+  const response = requireObject(value, 'root')
+  const evaluation = requireObject(response.evaluation, 'evaluation')
+  const coverage = requireObject(response.coverage, 'coverage')
+  const checkRunUrl = typeof response.checkRunUrl === 'string' ? response.checkRunUrl : undefined
+  const annotationCount = optionalCount(response.annotationCount)
+  // The server sends publishError: null when publishing succeeded; only a well-formed object is an error.
+  const publishError = isRecord(response.publishError) && typeof response.publishError.code === 'string' && typeof response.publishError.message === 'string'
+    ? { code: response.publishError.code, message: response.publishError.message }
+    : undefined
   return {
-    summary: {
-      managedResourcesInPlan: nonNegativeInteger(summary.managedResourcesInPlan, 'summary.managedResourcesInPlan'),
-      componentsMapped: nonNegativeInteger(summary.componentsMapped, 'summary.componentsMapped'),
-      hasPolicyViolations,
-    },
-    components,
+    components: array(response.components, 'components'),
     evaluation: {
-      unevaluatedPolicies: array(evaluation.unevaluatedPolicies, 'evaluation.unevaluatedPolicies').map((item, index) => {
-        const policy = record(item, `evaluation.unevaluatedPolicies.${index}`)
-        return {
-          policyId: requireString(policy.policyId, 'policyId'),
-          ...(typeof policy.name === 'string' ? { name: policy.name } : {}),
-          reason: requireString(policy.reason, 'reason'),
-        }
-      }),
-      componentsWithGaps: array(evaluation.componentsWithGaps, 'evaluation.componentsWithGaps').map((item, index) => {
-        const component = record(item, `evaluation.componentsWithGaps.${index}`)
-        return {
-          address: requireString(component.address, 'address'),
-          policyGaps: array(component.policyGaps, 'policyGaps').map((gapValue) => {
-            const gap = record(gapValue, 'policyGap')
-            return {
-              policyName: requireString(gap.policyName, 'policyName'),
-              reason: requireString(gap.reason, 'reason'),
-            }
-          }),
-        }
-      }),
+      unevaluatedPolicies: array(evaluation.unevaluatedPolicies, 'evaluation.unevaluatedPolicies'),
+      componentsWithGaps: array(evaluation.componentsWithGaps, 'evaluation.componentsWithGaps').map((item, index) => ({
+        policyGaps: array(requireObject(item, `evaluation.componentsWithGaps.${index}`).policyGaps, `evaluation.componentsWithGaps.${index}.policyGaps`),
+      })),
     },
     coverage: {
-      unmappedResources: array(coverage.unmappedResources, 'coverage.unmappedResources').map((item) => {
-        const resource = record(item, 'unmappedResource')
-        return {
-          address: requireString(resource.address, 'address'),
-          reason: requireString(resource.reason, 'reason'),
-        }
-      }),
-      mergedResources: array(coverage.mergedResources, 'coverage.mergedResources'),
-      skippedResources: array(coverage.skippedResources, 'coverage.skippedResources'),
+      unmappedResources: array(coverage.unmappedResources, 'coverage.unmappedResources'),
     },
+    ...(checkRunUrl ? { checkRunUrl } : {}),
+    ...(annotationCount === undefined ? {} : { annotationCount }),
+    ...(publishError ? { publishError } : {}),
   }
 }
 
-function parseFlaggedComponent(value: unknown, index: number): FlaggedComponent {
-  const component = record(value, `components.${index}`)
-  return {
-    address: requireString(component.address, 'address'),
-    ...(typeof component.sourceAddress === 'string' ? { sourceAddress: component.sourceAddress } : {}),
-    tfType: requireString(component.tfType, 'tfType'),
-    technology: requireString(component.technology, 'technology'),
-    type: requireString(component.type, 'type'),
-    currentVersion: requireString(component.currentVersion, 'currentVersion'),
-    policyComponents: array(component.policyComponents, 'policyComponents').map((item) => {
-      const policy = record(item, 'policyComponent')
-      return {
-        policyName: requireString(policy.policyName, 'policyName'),
-        status: requireString(policy.status, 'status'),
-        ...(typeof policy.desiredVersion === 'string' ? { desiredVersion: policy.desiredVersion } : {}),
-        ...(typeof policy.recommendedVersion === 'string' ? { recommendedVersion: policy.recommendedVersion } : {}),
-        ...(typeof policy.hasForceUpgrade === 'boolean' ? { hasForceUpgrade: policy.hasForceUpgrade } : {}),
-        ...(typeof policy.impendingDate === 'string' ? { impendingDate: policy.impendingDate } : {}),
-        ...(typeof policy.outdatedDate === 'string' ? { outdatedDate: policy.outdatedDate } : {}),
-        ...(typeof policy.dueDate === 'string' ? { dueDate: policy.dueDate } : {}),
-      }
-    }),
-  }
+// An optional count: anything but a non-negative safe integer is dropped.
+function optionalCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
-function record(value: unknown, field: string): Record<string, unknown> {
-  if (!isRecord(value)) invalid(field)
+function requireObject(value: unknown, field: string): Record<string, unknown> {
+  if (!isRecord(value)) throw invalidResponseError(field)
   return value
 }
 
 function array(value: unknown, field: string): unknown[] {
-  if (!Array.isArray(value)) invalid(field)
+  if (!Array.isArray(value)) throw invalidResponseError(field)
   return value
 }
 
-function nonNegativeInteger(value: unknown, field: string): number {
-  const number = requireNumber(value, field)
-  if (!Number.isInteger(number) || number < 0) invalid(field)
-  return number
-}
-
-function invalid(field: string): never {
-  throw new Error(`Invalid API response: ${field}`)
+function invalidResponseError(field: string): Error {
+  return new Error(`Invalid API response: ${field}`)
 }
