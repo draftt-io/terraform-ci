@@ -2,7 +2,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { gzipSync } from 'node:zlib'
 import { parseScanResponse, type ScanResponse } from './contracts.ts'
 import { isRecord } from './objects.ts'
+import packageJson from '../package.json' with { type: 'json' }
 
+const USER_AGENT = `draftt-terraform-ci/${packageJson.version}`
 const TOTAL_TIMEOUT_MS = 8 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 310 * 1000
 const MAX_ATTEMPTS = 3
@@ -33,6 +35,7 @@ export async function scanTerraformPlan(apiUrl: string, apiKey: string, body: st
         headers: {
           authorization: `Bearer ${apiKey}`,
           'content-type': 'application/json',
+          'user-agent': USER_AGENT,
           ...(compress ? { 'content-encoding': 'gzip' } : {}),
         },
         body: payload,
