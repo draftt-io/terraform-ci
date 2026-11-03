@@ -31912,7 +31912,7 @@ function invalidResponseError(field) {
 }
 
 ;// CONCATENATED MODULE: ./package.json
-const package_namespaceObject = {"rE":"1.0.0-rc.2"};
+const package_namespaceObject = {"rE":"1.0.0"};
 ;// CONCATENATED MODULE: ./src/api.ts
 
 
