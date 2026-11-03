@@ -55,6 +55,8 @@ jobs:
         run: |
           if [[ -n "$(git status --porcelain -- dist/)" ]]; then
             git status --short -- dist/ >&2
+            git --no-pager diff --stat -- dist/ >&2
+            git --no-pager diff -- dist/ | head -400 >&2
             echo "dist/ differs from the source; run npm run bundle and commit the result" >&2
             exit 1
           fi
