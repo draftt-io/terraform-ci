@@ -17,11 +17,10 @@ jobs:
   workflows:
     name: Audit workflows
     runs-on: ubuntu-latest
-    # Reads the workflow files and uploads the audit result to code scanning
     permissions:
-      contents: read
-      actions: read
-      security-events: write
+      contents: read # reads the workflow files
+      actions: read # lets the audit resolve the pinned actions
+      security-events: write # uploads the audit result to code scanning
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,9 +34,8 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
-    # Builds and tests the checkout; publishes nothing
     permissions:
-      contents: read
+      contents: read # builds and tests the checkout; publishes nothing
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
