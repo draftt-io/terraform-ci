@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  # Audits the workflows themselves: unpinned actions, template injection, excessive permissions.
+  workflows:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Audit workflows with zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          persona: pedantic
+
   verify:
     runs-on: ubuntu-latest
     steps:
