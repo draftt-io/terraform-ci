@@ -3,17 +3,16 @@ import path from 'node:path'
 
 const CONFIGURATION_FILE_SUFFIXES = ['.tf.json', '.tofu.json', '.tf', '.tofu'] as const
 
-export interface TerraformComponentReference {
+interface TerraformComponentReference {
   address: string
-  sourceAddress?: string
 }
 
-export interface SourceLocation {
+interface SourceLocation {
   path: string
   startLine: number
 }
 
-export type SourceMappingReason =
+type SourceMappingReason =
   | 'invalid_address'
   | 'ambiguous_declaration'
   | 'missing_declaration'
@@ -25,7 +24,7 @@ export type SourceMapping =
   | { kind: 'found'; location: SourceLocation }
   | { kind: 'unresolved'; reason: SourceMappingReason }
 
-export interface TerraformSourceLocatorOptions {
+interface TerraformSourceLocatorOptions {
   workspaceRoot: string
   terraformRoot: string
 }
@@ -124,8 +123,7 @@ export class TerraformSourceLocator {
   }
 
   async locate(reference: TerraformComponentReference): Promise<SourceMapping> {
-    const targetAddress = reference.sourceAddress ?? reference.address
-    const address = parseTerraformAddress(targetAddress)
+    const address = parseTerraformAddress(reference.address)
     if (address === undefined) {
       return unresolved('invalid_address')
     }

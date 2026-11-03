@@ -2,7 +2,6 @@ import type { ScanResponse } from '../src/contracts.ts'
 
 export function scanResponse(overrides: Partial<ScanResponse> = {}): ScanResponse {
   return {
-    summary: { managedResourcesInPlan: 1, componentsMapped: 1, hasPolicyViolations: true },
     components: [{
       address: 'aws_db_instance.primary',
       tfType: 'aws_db_instance',
@@ -19,7 +18,7 @@ export function scanResponse(overrides: Partial<ScanResponse> = {}): ScanRespons
       unevaluatedPolicies: [],
       componentsWithGaps: [],
     },
-    coverage: { unmappedResources: [], mergedResources: [], skippedResources: [] },
+    coverage: { unmappedResources: [] },
     ...overrides,
   }
 }

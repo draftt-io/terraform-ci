@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -50,5 +50,21 @@ test('reports unavailable Git repository state', async () => {
     )
   } finally {
     await rm(parent, { recursive: true, force: true })
+  }
+})
+
+test('reports a workspace that is a subdirectory of the repository as nested', async () => {
+  const repository = await mkdtemp(path.join(tmpdir(), 'terraform-nested-'))
+  try {
+    await execFileAsync('git', ['-C', repository, 'init'])
+    await mkdir(path.join(repository, 'infra'))
+    await writeFile(path.join(repository, 'infra', 'main.tf'), 'resource "aws_s3_bucket" "main" {}\n')
+    await execFileAsync('git', ['-C', repository, 'add', '.'])
+    await execFileAsync('git', ['-C', repository, '-c', 'user.name=Draftt Test', '-c', 'user.email=test@draftt.io', 'commit', '-m', 'fixture'])
+    const { stdout } = await execFileAsync('git', ['-C', repository, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
+    assert.equal(await inspectWorkspaceForSourceMapping(path.join(repository, 'infra'), stdout.trim()), 'nested_workspace')
+    assert.equal(await inspectWorkspaceForSourceMapping(await realpath(repository), stdout.trim()), 'matched')
+  } finally {
+    await rm(repository, { recursive: true, force: true })
   }
 })

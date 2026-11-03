@@ -3,57 +3,39 @@ import test from 'node:test'
 import { parseScanResponse } from '../src/contracts.ts'
 import { scanResponse } from './fixtures.ts'
 
-test('accepts the public UI Backend response contract', () => {
+test('reads the counted parts of the Draftt CI answer and ignores the rest', () => {
   const response = scanResponse()
   const parsed = parseScanResponse({
     ...response,
+    summary: { managedResourcesInPlan: 1, componentsMapped: 1, hasPolicyViolations: true },
     evaluation: {
       ...response.evaluation,
       evaluatedPolicies: [{ policyId: '10', name: 'Supported version' }],
-      componentsFullyEvaluated: 1,
+      componentsWithGaps: [{ address: 'aws_db_instance.primary', policyGaps: [{ policyName: 'Policy', reason: 'missing_data' }] }],
     },
+    coverage: { ...response.coverage, mergedResources: [], skippedResources: [] },
   })
-  assert.deepEqual(parsed, response)
-})
-
-test('ignores response details that do not affect Action behavior', () => {
-  const response = scanResponse()
-  assert.deepEqual(parseScanResponse({
+  assert.deepEqual(parsed, {
     ...response,
-    evaluation: {
-      ...response.evaluation,
-      evaluatedPolicies: 'changed unused shape',
-      componentsFullyEvaluated: null,
-    },
-    coverage: {
-      ...response.coverage,
-      mergedResources: [{ changed: 'unused shape' }],
-      skippedResources: [null],
-    },
-  }), {
-    ...response,
-    coverage: {
-      ...response.coverage,
-      mergedResources: [{ changed: 'unused shape' }],
-      skippedResources: [null],
-    },
+    evaluation: { ...response.evaluation, componentsWithGaps: [{ policyGaps: [{ policyName: 'Policy', reason: 'missing_data' }] }] },
   })
 })
 
-test('rejects an inconsistent violation summary', () => {
-  const response = scanResponse({
-    summary: { managedResourcesInPlan: 1, componentsMapped: 1, hasPolicyViolations: false },
-  })
-  assert.throws(() => parseScanResponse(response), /summary\.hasPolicyViolations/)
+test('rejects malformed response data', () => {
+  assert.throws(() => parseScanResponse({ ...scanResponse(), coverage: null }), /coverage/)
+  assert.throws(() => parseScanResponse({ ...scanResponse(), evaluation: { unevaluatedPolicies: [], componentsWithGaps: [{ policyGaps: 'none' }] } }), /componentsWithGaps\.0\.policyGaps/)
 })
 
-test('rejects malformed nested response data', () => {
-  const response = scanResponse()
-  response.evaluation.componentsWithGaps = [{
-    address: 'aws_db_instance.primary',
-    policyGaps: [{ policyName: 'Policy', reason: 'missing_data' }],
-  }]
-  const parsed = parseScanResponse(response)
-  assert.equal(parsed.evaluation.componentsWithGaps[0]?.policyGaps[0]?.reason, 'missing_data')
-  assert.throws(() => parseScanResponse({ ...response, coverage: null }), /coverage/)
+test('parses the publish fields', () => {
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 'https://github.com/o/r/runs/1', annotationCount: 3, publishError: { code: 'comment', message: 'm' } })
+  assert.equal(parsed.checkRunUrl, 'https://github.com/o/r/runs/1')
+  assert.equal(parsed.annotationCount, 3)
+  assert.deepEqual(parsed.publishError, { code: 'comment', message: 'm' })
+  assert.equal('publishError' in parseScanResponse({ ...scanResponse(), publishError: null }), false)
+})
+
+test('drops malformed optional values, keeping the rest of the response', () => {
+  const parsed = parseScanResponse({ ...scanResponse(), checkRunUrl: 1, annotationCount: -1, publishError: { code: 1 } })
+  for (const field of ['checkRunUrl', 'annotationCount', 'publishError'] as const) assert.equal(parsed[field], undefined, field)
+  assert.equal(parsed.components.length, 1)
 })
