@@ -27,4 +27,28 @@ jobs:
       - run: npm test
       - run: npm run bundle
       - name: Verify committed bundle
-        run: git diff --exit-code -- dist/
+        run: |
+          if [[ -n "$(git status --porcelain -- dist/)" ]]; then
+            git status --short -- dist/ >&2
+            echo "dist/ differs from the source; run npm run bundle and commit the result" >&2
+            exit 1
+          fi
+      - name: Write a smoke-test plan
+        run: echo '{"format_version":"1.2","resource_changes":[]}' > smoke-plan.json
+      # Runs the committed bundle the way a customer workflow does. The endpoint refuses the connection,
+      # so the step reports a scan error without failing; the outputs prove the bundle loaded and ran.
+      - name: Run the Action from this checkout
+        id: smoke
+        uses: ./
+        with:
+          plan-json: smoke-plan.json
+          api-key: smoke-test
+          api-url: https://127.0.0.1:9/ci/scans
+      - name: Check the smoke-test outputs
+        env:
+          SCAN_STATUS: ${{ steps.smoke.outputs.scan-status }}
+        run: |
+          if [[ "$SCAN_STATUS" != "error" ]]; then
+            echo "Expected scan-status error from the unreachable endpoint, got '$SCAN_STATUS'" >&2
+            exit 1
+          fi
