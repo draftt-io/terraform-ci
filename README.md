@@ -110,17 +110,6 @@ The API key belongs to the Draftt organization: a workflow in any repository tha
 
 The job log shows the `api-url` host (never its path or query) and the scan key, each retry wait (for example `Draftt answered 502, retrying in 0.5 s (attempt 2 of 3)`), any publish error the App reported, and on completion the violation, warning and annotation counts and the check URL. The API key, plan values and Draftt response bodies are never logged, except the service's message on a `4xx` or a `502`.
 
-## Development
+## Contributing
 
-Node.js 24 is required.
-
-```text
-npm ci
-npm run typecheck
-npm test
-npm run bundle
-```
-
-`dist/index.js` is committed because GitHub executes the bundle directly. CI rebuilds it and fails if it differs from the TypeScript source.
-
-The manual Release workflow accepts a semantic version tag, reruns the full verification, and creates the GitHub release from `main`. New releases default to prerelease until explicitly promoted.
+Build, test and release steps are in [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability as described in [SECURITY.md](SECURITY.md).
