@@ -196,6 +196,7 @@ test('uses the union of before and after sensitive mirrors on both update values
   const projected = sanitized.resource_changes[0]?.change as Record<string, Record<string, unknown>>
   assert.deepEqual(projected.before, { username: 'admin', nested: { second: 'keep' } })
   assert.deepEqual(projected.after, { username: 'admin', nested: { second: 'keep' } })
+  assert.deepEqual(projected.after_unknown, { endpoint: true, password: true, nested: { client_secret: true } })
 })
 
 test('removes marked sensitive values whatever the field name', () => {
@@ -210,6 +211,7 @@ test('removes marked sensitive values whatever the field name', () => {
 
   const projected = sanitizePlan(plan).resource_changes[0]?.change as Record<string, Record<string, unknown>>
   assert.deepEqual(projected.after, { values: ['first', null, 'third'] })
+  assert.deepEqual(projected.after_unknown, { endpoint: true, values: [false, true, false], admin_password: true })
 })
 
 test('scrubs provider-marked sensitive fields from real aws, random, helm, and mq resources', () => {

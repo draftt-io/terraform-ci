@@ -188,7 +188,7 @@ function projectResourceChange(resource: Record<string, unknown>): RetainedResou
     actions: Array.isArray(sourceChange.actions) ? structuredClone(sourceChange.actions) : [],
     before: scrubValue(sourceChange.before, mirrors, 'before'),
     after: scrubValue(sourceChange.after, mirrors, 'after'),
-    after_unknown: scrubValue(sourceChange.after_unknown ?? {}, [], 'after_unknown'),
+    after_unknown: markRemovedAsUnknown(sourceChange.after_unknown, sourceChange.after, mirrors),
   }
   for (const key of ['before', 'after'] as const) {
     if (projectedChange[key] === ABSENT) projectedChange[key] = null
@@ -229,6 +229,36 @@ function scrubValue(value: unknown, mirrors: unknown[], pathPrefix: string): unk
     return output
   }
   return value
+}
+
+// Terraform encodes a value it cannot show as absent from `after` plus `true` at the same path in `after_unknown`.
+// A removed sensitive value is encoded the same way, so the server treats it as unknown rather than unset.
+function markRemovedAsUnknown(afterUnknown: unknown, after: unknown, mirrors: unknown[]): Record<string, unknown> {
+  const marked = unknownMirrorWithRemoved(structuredClone(afterUnknown ?? {}), after, mirrors)
+  return isRecord(marked) ? marked : {}
+}
+
+function unknownMirrorWithRemoved(unknown: unknown, value: unknown, mirrors: unknown[]): unknown {
+  if (unknown === true) return true
+  if (mirrors.some((mirror) => mirror === true)) return true
+  if (Array.isArray(value)) {
+    const base = Array.isArray(unknown) ? unknown : []
+    const merged = value.map((item, index) => {
+      const itemMirrors = mirrors.map((mirror) => (Array.isArray(mirror) ? mirror[index] : undefined))
+      return unknownMirrorWithRemoved(base[index], item, itemMirrors)
+    })
+    return merged.some((entry) => entry !== undefined) ? merged.map((entry) => entry ?? false) : unknown
+  }
+  if (isRecord(value)) {
+    const merged: Record<string, unknown> = isRecord(unknown) ? { ...unknown } : {}
+    for (const [key, child] of Object.entries(value)) {
+      const childMirrors = mirrors.map((mirror) => (isRecord(mirror) ? mirror[key] : undefined))
+      const childUnknown = unknownMirrorWithRemoved(merged[key], child, childMirrors)
+      if (childUnknown !== undefined) merged[key] = childUnknown
+    }
+    return Object.keys(merged).length > 0 ? merged : unknown
+  }
+  return unknown
 }
 
 function topLevelSensitiveAttributes(mirrors: unknown[]): Set<string> {

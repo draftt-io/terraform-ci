@@ -100,7 +100,7 @@ Requests over 1 MiB are gzip-compressed, and a scrubbed plan over 49 MiB fails t
 
 ## Plan security
 
-The Action keeps only the plan sections Draftt needs, removes every value Terraform marks sensitive from both sides of an update and from the configuration, and rejects the plan if a recognized credential format remains. Provider configuration is reduced to the region and the assumed role ARN.
+The Action keeps only the plan sections Draftt needs, removes every value Terraform marks sensitive from both sides of an update and from the configuration, and rejects the plan if a recognized credential format remains. A removed value is marked unknown in the plan, the same way Terraform marks a value known only after apply, so Draftt reports a policy that depends on it as not evaluated instead of assuming a default. Provider configuration is reduced to the region and the assumed role ARN.
 
 The raw plan file is limited to 50 MiB, the scrubbed plan to 49 MiB, and the whole request to 50 MiB; the source map is dropped first when the request would exceed it. The API key is masked before the plan is read.
 
