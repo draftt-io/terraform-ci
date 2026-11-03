@@ -1,52 +1,17 @@
 import { realpath, stat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { isRecord } from './objects.ts'
+import type { ScanSource, SourceMapEntry } from './request.ts'
 
-export const MAX_PLAN_BYTES = 50 * 1024 * 1024
+const MiB = 1024 * 1024
+// The raw plan file on disk.
+export const MAX_PLAN_FILE_BYTES = 50 * MiB
+// The scrubbed plan as the service measures it, JSON.stringify(plan).
+export const MAX_PLAN_BYTES = 49 * MiB
+// The whole request body, before gzip.
+const MAX_REQUEST_BYTES = 50 * MiB
 
-const SECRET_FIELD_NAMES = new Set([
-  'access_key',
-  'access_token',
-  'api_key',
-  'api_token',
-  'auth_token',
-  'bearer_token',
-  'client_certificate',
-  'client_key',
-  'client_secret',
-  'connection_string',
-  'connection_uri',
-  'credential',
-  'credentials',
-  'event_source_token',
-  'external_id',
-  'id_token',
-  'master_password',
-  'master_password_wo',
-  'master_user_secret',
-  'oauth_token',
-  'password',
-  'password_data',
-  'password_wo',
-  'private_key',
-  'private_key_data',
-  'private_key_pem',
-  'refresh_token',
-  'repository_password',
-  'result',
-  'secret',
-  'secret_binary',
-  'secret_binary_wo',
-  'secret_key',
-  'secret_string',
-  'secret_string_wo',
-  'service_account_json',
-  'service_account_key',
-  'session_token',
-  'token',
-  'user',
-  'web_identity_token',
-])
+const PLAN_TOO_LARGE = 'The Terraform plan is larger than 49 MiB, the most Draftt CI accepts. Scan a smaller root module with terraform-root, or split the plan.'
 
 const CREDENTIAL_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
   { name: 'AWS access key', pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/ },
@@ -90,7 +55,7 @@ export async function readAndSanitizePlan(planPath: string, workspaceRoot: strin
   }
   const file = await stat(absolutePath)
   if (!file.isFile()) throw new Error('Plan JSON path is not a file')
-  if (file.size > MAX_PLAN_BYTES) throw new Error('Plan JSON exceeds the 50 MiB input limit')
+  if (file.size > MAX_PLAN_FILE_BYTES) throw new Error('Plan JSON exceeds the 50 MiB input limit')
 
   let raw: string
   try {
@@ -171,10 +136,7 @@ function validateResourceChange(resource: Record<string, unknown>): void {
     if (mirror !== undefined && typeof mirror !== 'boolean' && !isRecord(mirror)) {
       throw new Error(`Terraform resource change has an invalid ${field} mirror`)
     }
-    if (mirror !== undefined) {
-      validateBooleanMirror(mirror, field)
-      validateExpectedSensitiveFields(mirror, field)
-    }
+    if (mirror !== undefined) validateBooleanMirror(mirror, field)
   }
 }
 
@@ -191,28 +153,29 @@ function validateBooleanMirror(value: unknown, path: string): void {
   throw new Error(`Terraform plan has an invalid value mirror at ${path}`)
 }
 
-function validateExpectedSensitiveFields(value: unknown, path: string, fieldName?: string): void {
-  if (value === false || value === null) return
-  if (value === true) {
-    if (fieldName === undefined || !SECRET_FIELD_NAMES.has(fieldName.toLowerCase())) {
-      throw new Error(`Terraform plan marks an unsupported sensitive field at ${path}`)
-    }
-    return
-  }
-  if (Array.isArray(value)) {
-    value.forEach((child, index) => validateExpectedSensitiveFields(child, `${path}.${index}`, fieldName))
-    return
-  }
-  if (isRecord(value)) {
-    for (const [key, child] of Object.entries(value)) validateExpectedSensitiveFields(child, `${path}.${key}`, key)
-  }
+interface ScanRequest {
+  plan: SanitizedPlan
+  policyIds?: string[]
+  source?: ScanSource
+  sourceMap?: Record<string, SourceMapEntry>
 }
 
-export function serializeScanRequest(plan: SanitizedPlan, policyIds: string[] | undefined): string {
-  const request = policyIds === undefined ? { plan } : { plan, policyIds }
-  const body = JSON.stringify(request)
-  if (Buffer.byteLength(body) > MAX_PLAN_BYTES) throw new Error('Scrubbed scan request exceeds the 50 MiB request limit')
-  return body
+export function serializeScanRequest(input: ScanRequest): { body: string; sourceMapDropped: boolean } {
+  // Serialized once: the body below is byte for byte JSON.stringify({ plan, policyIds?, sourceMap?, source? }).
+  const planJson = JSON.stringify(input.plan)
+  if (Buffer.byteLength(planJson) > MAX_PLAN_BYTES) throw new Error(PLAN_TOO_LARGE)
+  const ids = input.policyIds === undefined ? '' : `,"policyIds":${JSON.stringify(input.policyIds)}`
+  const source = input.source ? `,"source":${JSON.stringify(input.source)}` : ''
+  const sourceMap = input.sourceMap ? `,"sourceMap":${JSON.stringify(input.sourceMap)}` : ''
+  let body = `{"plan":${planJson}${ids}${sourceMap}${source}}`
+  let sourceMapDropped = false
+  // The source map is optional enrichment: drop it before giving up on an oversized request.
+  if (Buffer.byteLength(body) > MAX_REQUEST_BYTES && sourceMap) {
+    body = `{"plan":${planJson}${ids}${source}}`
+    sourceMapDropped = true
+  }
+  if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error('Scrubbed scan request exceeds the 50 MiB request limit')
+  return { body, sourceMapDropped }
 }
 
 function projectResourceChange(resource: Record<string, unknown>): RetainedResource {
@@ -225,7 +188,7 @@ function projectResourceChange(resource: Record<string, unknown>): RetainedResou
     actions: Array.isArray(sourceChange.actions) ? structuredClone(sourceChange.actions) : [],
     before: scrubValue(sourceChange.before, mirrors, 'before'),
     after: scrubValue(sourceChange.after, mirrors, 'after'),
-    after_unknown: scrubValue(sourceChange.after_unknown ?? {}, [], 'after_unknown'),
+    after_unknown: markRemovedAsUnknown(sourceChange.after_unknown, sourceChange.after, mirrors),
   }
   for (const key of ['before', 'after'] as const) {
     if (projectedChange[key] === ABSENT) projectedChange[key] = null
@@ -259,7 +222,6 @@ function scrubValue(value: unknown, mirrors: unknown[], pathPrefix: string): unk
   if (isRecord(value)) {
     const output: Record<string, unknown> = {}
     for (const [key, child] of Object.entries(value)) {
-      if (SECRET_FIELD_NAMES.has(key.toLowerCase())) continue
       const childMirrors = mirrors.map((mirror) => (isRecord(mirror) ? mirror[key] : undefined))
       const scrubbed = scrubValue(child, childMirrors, `${pathPrefix}.${key}`)
       if (scrubbed !== ABSENT) output[key] = scrubbed
@@ -267,6 +229,36 @@ function scrubValue(value: unknown, mirrors: unknown[], pathPrefix: string): unk
     return output
   }
   return value
+}
+
+// Terraform encodes a value it cannot show as absent from `after` plus `true` at the same path in `after_unknown`.
+// A removed sensitive value is encoded the same way, so the server treats it as unknown rather than unset.
+function markRemovedAsUnknown(afterUnknown: unknown, after: unknown, mirrors: unknown[]): Record<string, unknown> {
+  const marked = unknownMirrorWithRemoved(structuredClone(afterUnknown ?? {}), after, mirrors)
+  return isRecord(marked) ? marked : {}
+}
+
+function unknownMirrorWithRemoved(unknown: unknown, value: unknown, mirrors: unknown[]): unknown {
+  if (unknown === true) return true
+  if (mirrors.some((mirror) => mirror === true)) return true
+  if (Array.isArray(value)) {
+    const base = Array.isArray(unknown) ? unknown : []
+    const merged = value.map((item, index) => {
+      const itemMirrors = mirrors.map((mirror) => (Array.isArray(mirror) ? mirror[index] : undefined))
+      return unknownMirrorWithRemoved(base[index], item, itemMirrors)
+    })
+    return merged.some((entry) => entry !== undefined) ? merged.map((entry) => entry ?? false) : unknown
+  }
+  if (isRecord(value)) {
+    const merged: Record<string, unknown> = isRecord(unknown) ? { ...unknown } : {}
+    for (const [key, child] of Object.entries(value)) {
+      const childMirrors = mirrors.map((mirror) => (isRecord(mirror) ? mirror[key] : undefined))
+      const childUnknown = unknownMirrorWithRemoved(merged[key], child, childMirrors)
+      if (childUnknown !== undefined) merged[key] = childUnknown
+    }
+    return Object.keys(merged).length > 0 ? merged : unknown
+  }
+  return unknown
 }
 
 function topLevelSensitiveAttributes(mirrors: unknown[]): Set<string> {
@@ -343,7 +335,7 @@ function projectConfigModule(
         const expressions: Record<string, unknown> = {}
         const sensitive = sensitiveByAddress.get(configAddress) ?? new Set<string>()
         for (const [key, expression] of Object.entries(candidate.expressions)) {
-          if (sensitive.has(key) || SECRET_FIELD_NAMES.has(key.toLowerCase())) continue
+          if (sensitive.has(key)) continue
           const scrubbed = scrubValue(expression, [], `configuration.${configAddress}.${key}`)
           if (scrubbed !== ABSENT) expressions[key] = scrubbed
         }
