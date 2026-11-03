@@ -1,4 +1,4 @@
-import { realpath, stat, readFile } from 'node:fs/promises'
+import { open, realpath, type FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 import { isRecord } from './objects.ts'
 import type { ScanSource, SourceMapEntry } from './request.ts'
@@ -53,15 +53,21 @@ export async function readAndSanitizePlan(planPath: string, workspaceRoot: strin
   } catch {
     throw new Error('Plan JSON could not be read')
   }
-  const file = await stat(absolutePath)
-  if (!file.isFile()) throw new Error('Plan JSON path is not a file')
-  if (file.size > MAX_PLAN_FILE_BYTES) throw new Error('Plan JSON exceeds the 50 MiB input limit')
-
-  let raw: string
+  // One handle for the size check and the read, so the checked file is the file that is read.
+  let handle: FileHandle
   try {
-    raw = await readFile(absolutePath, 'utf8')
+    handle = await open(absolutePath, 'r')
   } catch {
     throw new Error('Plan JSON could not be read')
+  }
+  let raw: string
+  try {
+    const file = await handle.stat()
+    if (!file.isFile()) throw new Error('Plan JSON path is not a file')
+    if (file.size > MAX_PLAN_FILE_BYTES) throw new Error('Plan JSON exceeds the 50 MiB input limit')
+    raw = await handle.readFile('utf8')
+  } finally {
+    await handle.close()
   }
 
   let parsed: unknown

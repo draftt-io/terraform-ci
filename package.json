@@ -5,10 +5,10 @@
   "description": "GitHub Action for Draftt Terraform policy scans",
   "type": "module",
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=24"
   },
   "scripts": {
-    "bundle": "ncc build src/index.ts -o dist --minify --license licenses.txt",
+    "bundle": "ncc build src/index.ts -o dist --license licenses.txt",
     "test": "node --test --experimental-strip-types test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

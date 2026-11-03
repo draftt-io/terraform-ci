@@ -1,40 +1,44 @@
 name: Draftt Terraform Policy Scan
-description: Upload a scrubbed Terraform plan to Draftt CI, which scans it and publishes the result on the pull request
+description: Scan Terraform and OpenTofu plans against your Draftt policies; the Draftt CI GitHub App reports the result on the pull request
+author: Draftt
+branding:
+  icon: shield
+  color: purple
 
 inputs:
   plan-json:
-    description: Path to an existing Terraform or OpenTofu plan JSON file
+    description: Path to the Terraform or OpenTofu plan JSON, the output of terraform show -json
+    required: true
+  api-key:
+    description: Draftt access key; pass it from a secret, for example secrets.DRAFTT_API_KEY
     required: true
   api-url:
-    description: The Draftt CI scans endpoint; must use HTTPS and end in /ci/scans
+    description: Draftt CI scans endpoint. Change it only when Draftt asks you to; must use HTTPS and end in /ci/scans
     required: false
     default: https://api.draftt.io/ci/scans
-  api-key:
-    description: Draftt access key
-    required: true
   terraform-root:
-    description: Root Terraform module directory; also the scan key, one check and one PR comment per root
+    description: Root module directory, relative to the workspace. Each root gets its own check and pull request comment
     required: false
     default: .
   policy-ids:
-    description: Optional JSON array of Draftt policy ids
+    description: JSON array of Draftt policy IDs to evaluate; omit it to use the organization's policies
     required: false
   fail-on-scan-error:
-    description: Fail the Action when a reliable scan cannot complete
+    description: Fail the step when the scan cannot complete. Policy violations never fail it
     required: false
     default: "false"
 
 outputs:
   scan-status:
-    description: completed, skipped, or error
+    description: completed, skipped (pull request from an external fork), or error
   violation-count:
     description: Number of resources with policy violations
   warning-count:
     description: Number of incomplete evaluation or coverage warnings
   annotation-count:
-    description: Annotations the Draftt CI App published on the check
+    description: Number of annotations the Draftt CI App published on the check
   check-run-url:
-    description: URL of the check run the Draftt CI App published, empty when none was published
+    description: URL of the check the Draftt CI App published; empty when none was published
 
 runs:
   using: node24
