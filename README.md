@@ -1,18 +1,41 @@
-# Draftt Terraform CI
+# Draftt Terraform Policy Scan
 
-`draftt-io/terraform-ci` reads an existing Terraform or OpenTofu plan JSON, scrubs it on the runner, and uploads it to Draftt CI. Draftt CI scans the plan against your Draftt policies and, on pull requests, the Draftt CI GitHub App publishes the result. The Action never writes to GitHub itself and needs no GitHub token.
+Scans the Terraform or OpenTofu plan of a pull request against your Draftt policies. The Action scrubs the plan JSON on the runner and uploads the scrubbed copy to Draftt; the Draftt CI GitHub App then publishes a check and a comment on the pull request. The Action needs no GitHub token, and policy violations never fail your workflow.
 
-The raw plan never leaves the runner. Policy violations never fail the workflow; scan errors fail it only with `fail-on-scan-error: "true"`.
+Setup guide: [docs.draftt.io/draftt-ci](https://docs.draftt.io/draftt-ci)
 
-## Requirements
+![Draftt CI check on a pull request listing two changed resources, their policy status and the violated policy](.github/images/draftt-ci-check.png)
 
-- The Draftt CI GitHub App is installed on the repository and bound to your Draftt organization.
-- `api-url` points at the Draftt CI scans endpoint (`/ci/scans`); the default is `https://api.draftt.io/ci/scans`.
-- A Draftt API key, stored as a secret.
+## Before you start
+
+- The Draftt CI GitHub App is installed on the repository. In Draftt, go to **Integrations** and open the **Draftt CI** card.
+- A Draftt access key, stored as a GitHub secret named `DRAFTT_API_KEY`. In Draftt, go to **Settings > Access Keys**.
+- A workflow step that writes the plan as JSON, for example `terraform show -json tfplan > plan.json`.
 
 ## Usage
 
-Create `plan.json` from the same pull-request revision the Action inspects. Do not print, cache, commit, or upload that file: Terraform plan JSON can contain plaintext secrets.
+Add the scan after the step that writes the plan JSON. Check out the pull request head so Draftt can annotate the changed lines.
+
+```yaml
+- uses: actions/checkout@v7
+  with:
+    ref: ${{ github.event.pull_request.head.sha }}
+# terraform init, then:
+- run: terraform plan -out=tfplan
+- run: terraform show -json tfplan > plan.json
+- name: Scan Terraform policies with Draftt
+  uses: draftt-io/terraform-ci@v1
+  with:
+    plan-json: plan.json
+    api-key: ${{ secrets.DRAFTT_API_KEY }}
+```
+
+> [!WARNING]
+> Terraform plan JSON can contain plaintext secrets. Do not print, cache, commit or upload `plan.json`. The Action scrubs the plan before it uploads anything.
+
+For OpenTofu, use `tofu plan` and `tofu show -json`.
+
+### Complete workflow
 
 ```yaml
 name: Terraform policy scan
@@ -20,6 +43,7 @@ name: Terraform policy scan
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    # Run only when Terraform files change
     paths:
       - "**/*.tf"
       - "**/*.tf.json"
@@ -29,15 +53,18 @@ on:
       - "**/*.tofu.json"
       - "**/.terraform.lock.hcl"
 
+# The Action does not call GitHub; the Draftt CI App publishes the result
 permissions:
   contents: read
 
+# One scan per pull request; a new push cancels the previous run
 concurrency:
   group: draftt-terraform-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   policy-scan:
+    # Draft pull requests are skipped
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -45,71 +72,83 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-      # Configure Terraform/OpenTofu and run init above the following commands.
+      # Configure Terraform or OpenTofu and run init above the following commands
       - run: terraform plan -out=tfplan
       - run: terraform show -json tfplan > plan.json
       - name: Scan Terraform policies with Draftt
-        uses: draftt-io/terraform-ci@<pinned-release-commit-sha>
+        uses: draftt-io/terraform-ci@v1
         with:
           plan-json: plan.json
           api-key: ${{ secrets.DRAFTT_API_KEY }}
 ```
 
-Use `tofu plan` and `tofu show -json` when the repository uses OpenTofu.
+## What the pull request shows
 
-## What the App publishes
+On a pull request event the Draftt CI App completes one check run, `Draftt Terraform Policy Scan` (with the root in parentheses for a root other than `.`), with annotations on the changed lines, and posts or updates one comment per root. The check concludes `success` without policy violations and `neutral` with some; it never fails, so do not make it a required status check.
 
-On a pull request event the Draftt CI App completes one check run, `Draftt Terraform Policy Scan` (or `Draftt Terraform Policy Scan (<scanKey>)` for a root other than `.`), with annotations on the changed lines, and posts or updates one PR comment per scan key. The check never fails: it concludes `success` without policy violations and `neutral` with some, so do not make it a required status check.
-
-On other events (`push`, `merge_group`, `workflow_dispatch`) Draftt CI scans the plan and publishes nothing; the counts appear in the outputs and the job summary.
+On other events (`push`, `merge_group`, `workflow_dispatch`) Draftt scans the plan and publishes nothing; the counts appear in the outputs and the job summary.
 
 ## Inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `plan-json` | required | Path to the Terraform or OpenTofu plan JSON |
-| `api-url` | `https://api.draftt.io/ci/scans` | The Draftt CI scans endpoint. Must use HTTPS and end in `/ci/scans`; anything else is an input error |
-| `api-key` | required | Draftt API key |
-| `terraform-root` | `.` | Root module directory, relative to the workspace (an absolute path inside `GITHUB_WORKSPACE` is accepted) |
-| `policy-ids` | | JSON array of Draftt policy ids; omit it to use the organization's default policies |
-| `fail-on-scan-error` | `false` | Fail the job when the scan cannot complete |
+| `plan-json` | required | Path to the Terraform or OpenTofu plan JSON, the output of `terraform show -json` |
+| `api-key` | required | Draftt access key; pass it from a secret |
+| `api-url` | `https://api.draftt.io/ci/scans` | Draftt CI scans endpoint. Change it only when Draftt asks you to; must use HTTPS and end in `/ci/scans` |
+| `terraform-root` | `.` | Root module directory, relative to the workspace. Each root gets its own check and comment |
+| `policy-ids` | | JSON array of Draftt policy IDs to evaluate; omit it to use the organization's policies |
+| `fail-on-scan-error` | `false` | Fail the step when the scan cannot complete. Policy violations never fail it |
 
 ## Outputs
 
+Give the step an `id` to read them.
+
 | Output | Description |
 |---|---|
-| `scan-status` | `completed`, `skipped` (pull request from an external fork), or `error` |
+| `scan-status` | `completed`, `skipped` (pull request from an external fork) or `error` |
 | `violation-count` | Resources with policy violations |
 | `warning-count` | Incomplete evaluation or coverage warnings |
 | `annotation-count` | Annotations the App published on the check |
-| `check-run-url` | URL of the check the App published, empty when none was published |
+| `check-run-url` | URL of the check the App published; empty when none was published |
 
-Outputs contain counts and the check URL only, never plan data, policy details, credentials, or backend error bodies.
+Outputs contain counts and the check URL only, never plan data, policy details, credentials or Draftt error bodies.
 
-## Scan keys and limits
+## Multiple Terraform roots
 
-- The scan key is `terraform-root` as a workspace-relative POSIX path, `.` for the repository root: letters, digits, `.`, `_`, `/` and `-`, at most 200 characters, no `..` segments. Use one `terraform-root` per root module to get one check and one comment per module.
-- A commit takes at most 50 scan keys. Uploads are deduplicated on `runId:runAttempt:scanKey`, so two scans in one workflow run attempt (matrix jobs included) must use different roots.
-- The App annotates changed lines only when the Action can send a map from resource address to file and line. It sends none when the pull request head is not checked out, Terraform files differ from the commit, `GITHUB_WORKSPACE` is not the repository root, Git cannot be inspected, or the map would push the request over 50 MiB; the findings then stay in the check summary and the PR comment. The map is capped at 100,000 resources.
-- Pull requests from external forks are skipped without reading the plan or uploading anything.
-- On `pull_request_target` the planned code runs with access to the Draftt key; prefer `pull_request`.
+Add one scan step per root module and set `terraform-root` on each. Each root gets its own check and its own comment. Two scans in the same workflow run, matrix jobs included, must use different roots. Naming rules and limits: [Multiple Terraform roots](https://docs.draftt.io/draftt-ci#multiple-terraform-roots).
 
-## Requests and errors
+## What is sent to Draftt
 
-Requests over 1 MiB are gzip-compressed, and a scrubbed plan over 49 MiB fails the scan before anything is sent. `502`, `503` and `504` answers and network failures are retried up to 3 attempts, waiting 0.5 s then 1 s; other statuses, `500` included, are final. On a `4xx` or a `502` the scan error is `Draftt answered <status>: <message>` with the service's message (for example `owner_mismatch` or `github_unavailable`); a `500` or other `5xx` is reported by status, and its body is never read.
+The raw plan never leaves the runner. The Action sends one HTTPS request to `api-url` with:
 
-## Plan security
+- **The planned changes**: the resource changes of managed resources (and the `aws_caller_identity` data source), with every value Terraform marks sensitive removed from both sides of each change. A removed value is marked unknown, the same way Terraform marks a value known only after apply, so a policy that depends on it is reported as not evaluated instead of evaluated against a default.
+- **A reduced configuration**: the configuration of the changed resources, including those inside modules, with sensitive values removed. Provider configuration is cut down to the region and the assumed role ARN, and the variables that set them.
+- **Where each resource is defined**: file path and line per resource address, so the App can annotate the changed lines.
+- **Where the scan came from**: repository and owner IDs, pull request number, head commit SHA, the `terraform-root`, and the workflow run ID, attempt and URL.
+- **`policy-ids`**, if you set it.
 
-The Action keeps only the plan sections Draftt needs, removes every value Terraform marks sensitive from both sides of an update and from the configuration, and rejects the plan if a recognized credential format remains. A removed value is marked unknown in the plan, the same way Terraform marks a value known only after apply, so Draftt reports a policy that depends on it as not evaluated instead of assuming a default. Provider configuration is reduced to the region and the assumed role ARN.
+Never sent: the raw plan, prior state, planned values, outputs, Terraform source files or any GitHub token. If a recognized credential format is still present after scrubbing, the Action stops and sends nothing. Pull requests from external forks are skipped before the plan is read.
 
-The raw plan file is limited to 50 MiB, the scrubbed plan to 49 MiB, and the whole request to 50 MiB; the source map is dropped first when the request would exceed it. The API key is masked before the plan is read.
+The access key belongs to your Draftt organization: any workflow that holds it can upload a scan for any pull request in the bound GitHub organization. Limit the secret to the repositories that run the scan, rotate it like a release credential, and protect `.github/workflows/` with CODEOWNERS. Do not run the scan on `pull_request_target`: the planned code would run with access to the key.
 
-The API key belongs to the Draftt organization: a workflow in any repository that holds it can upload a scan for any pull request of the bound GitHub organization. Limit the secret to the repositories that run the scan, rotate it like a release credential, and protect `.github/workflows/` with CODEOWNERS.
+## Troubleshooting
 
-## Logs
+Expand the scan step in the workflow run. The log shows the Draftt host, the root, the counts and the check URL, never the key or plan values.
 
-The job log shows the `api-url` host (never its path or query) and the scan key, each retry wait (for example `Draftt answered 502, retrying in 0.5 s (attempt 2 of 3)`), any publish error the App reported, and on completion the violation, warning and annotation counts and the check URL. The API key, plan values and Draftt response bodies are never logged, except the service's message on a `4xx` or a `502`.
+- **`Draftt answered 403: owner_mismatch`**: the access key and the Draftt CI installation belong to different organizations.
+- **`Draftt CI cannot access the repository`**: add the repository to the Draftt CI App installation in GitHub.
+- **No annotations on changed lines**: check out the pull request head (`ref: ${{ github.event.pull_request.head.sha }}`) and keep the workspace at the repository root.
 
-## Contributing
+By default a scan error is a warning and `scan-status` is `error`; set `fail-on-scan-error: "true"` to fail the step. More: [Troubleshooting](https://docs.draftt.io/draftt-ci#troubleshooting).
 
-Build, test and release steps are in [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability as described in [SECURITY.md](SECURITY.md).
+## Versioning
+
+`@v1` follows the latest 1.x release: fixes and new optional inputs, never a breaking change. A breaking change ships as `@v2`, with migration notes in its [release](https://github.com/draftt-io/terraform-ci/releases).
+
+To pin an exact release, use its full commit SHA and keep the tag as a comment, for example `draftt-io/terraform-ci@<full commit SHA> # v1.0.0`. Dependabot and Renovate update both.
+
+## Support
+
+Questions and problems: [support@draftt.io](mailto:support@draftt.io). Report a security issue to [security@draftt.io](mailto:security@draftt.io), not in a public issue; see [SECURITY.md](SECURITY.md).
+
+Licensed under [Apache-2.0](LICENSE). To build or change the Action, see [CONTRIBUTING.md](CONTRIBUTING.md).
