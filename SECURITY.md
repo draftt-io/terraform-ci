@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Report a vulnerability in this Action through GitHub's private vulnerability reporting: open the Security tab of this repository and choose "Report a vulnerability". Do not open a public issue for it.
+Report a vulnerability in this Action through GitHub's private vulnerability reporting (open the Security tab of this repository and choose "Report a vulnerability") or by email to [security@draftt.io](mailto:security@draftt.io). Do not open a public issue for it.
 
 Draftt acknowledges reports within three business days and keeps the reporter informed until the fix is released.
 
