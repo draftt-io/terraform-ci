@@ -5,20 +5,26 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
+# Every job declares its own permissions below
+permissions: {}
+
+# A new push to the same pull request or branch replaces the run in progress
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Audits the workflows themselves: unpinned actions, template injection, excessive permissions.
   workflows:
+    name: Audit workflows
     runs-on: ubuntu-latest
+    # Reads the workflow files and uploads the audit result to code scanning
     permissions:
       contents: read
       actions: read
       security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Audit workflows with zizmor
@@ -27,14 +33,18 @@ jobs:
           persona: pedantic
 
   verify:
+    name: Verify
     runs-on: ubuntu-latest
+    # Builds and tests the checkout; publishes nothing
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -56,7 +66,7 @@ jobs:
       # so the step reports a scan error without failing; the outputs prove the bundle loaded and ran.
       - name: Run the Action from this checkout
         id: smoke
-        uses: ./
+        uses: $/
         with:
           plan-json: smoke-plan.json
           api-key: smoke-test

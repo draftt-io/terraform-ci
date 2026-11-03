@@ -4,6 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A week between a release and its update, so a compromised release is caught before it lands here
+    cooldown:
+      default-days: 7
     groups:
       dev-dependencies:
         dependency-type: development
@@ -11,3 +14,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
