@@ -16,8 +16,8 @@
     "@actions/core": "3.0.1"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
-    "@vercel/ncc": "0.44.1",
-    "typescript": "5.9.3"
+    "@types/node": "26.6.6",
+    "@vercel/ncc": "0.45.0",
+    "typescript": "7.0.2"
   }
 }
