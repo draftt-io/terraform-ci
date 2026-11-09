@@ -122,7 +122,7 @@ When `scan-status` is `skipped` or `error`, every count is `0` and the URL is em
 
 ## Multiple Terraform roots
 
-Add one scan step per root module and set `terraform-root` on each. Each root gets its own check and its own comment. Two scans in the same workflow run, matrix jobs included, must use different roots. Naming rules and limits: [Multiple Terraform roots](https://docs.draftt.io/draftt-ci#multiple-terraform-roots).
+Add one scan step per root module and set `terraform-root` on each. Each root gets its own check and its own comment. Two scans in the same workflow run, matrix jobs included, must use different roots. Naming rules and limits: [Multiple Terraform roots](https://docs.draftt.io/draftt-ci-action#several-root-modules-in-one-repository).
 
 ## What is sent to Draftt
 
@@ -151,7 +151,7 @@ Expand the scan step in the workflow run. The log shows the Draftt host, the roo
 - **`Draftt CI cannot access the repository`**: the scan completed but the App could not publish; add the repository to the Draftt CI App installation in GitHub. Publish problems are warnings with `scan-status: completed`.
 - **No annotations on changed files**: check out the pull request head (`ref: ${{ github.event.pull_request.head.sha }}`), keep the workspace at the repository root, point `terraform-root` at the directory with the `.tf` files, and keep generated `.tf` files and `.terraform/` out of the working tree or in `.gitignore`.
 
-By default a scan error is a warning, the step stays green and `scan-status` is `error`, so adopting the scan never blocks a team; set `fail-on-scan-error: "true"` to fail the step instead. More: [Troubleshooting](https://docs.draftt.io/draftt-ci#troubleshooting).
+By default a scan error is a warning, the step stays green and `scan-status` is `error`, so adopting the scan never blocks a team; set `fail-on-scan-error: "true"` to fail the step instead. More: [Troubleshooting](https://docs.draftt.io/draftt-ci-action#troubleshooting).
 
 ## Versioning
 
